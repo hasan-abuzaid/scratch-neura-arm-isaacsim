@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "profiles": {
+    "franka": {
+      "label": "Franka Panda - simulation test profile",
+      "arm_joint_names": ["panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"],
+      "joint_aliases": {"joint1": "panda_joint1", "joint2": "panda_joint2", "joint3": "panda_joint3", "joint4": "panda_joint4", "joint5": "panda_joint5", "joint6": "panda_joint6", "joint7": "panda_joint7"},
+      "kinematics": {"provider": "franka_builtin", "end_effector_frame": "panda_hand"},
+      "gripper": {
+        "joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
+        "open_positions": [0.035, 0.035],
+        "closed_positions": [0.0, 0.0],
+        "position_unit": "m",
+        "tolerance": 0.001,
+        "duration_seconds": 1.0,
+        "timeout_seconds": 5.0
+      }
+    },
+    "generic": {
+      "label": "Unconfigured articulation: initialize, properties, wait only",
+      "arm_joint_names": [],
+      "joint_aliases": {},
+      "kinematics": null,
+      "gripper": null
+    }
+  }
+}

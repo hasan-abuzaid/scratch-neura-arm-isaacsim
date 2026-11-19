@@ -1,0 +1,18 @@
+[package]
+version = "1.4.0"
+title = "Scratch Blocks Demo"
+description = "EdScratch-style free canvas prototype for Isaac Sim 6.0.1"
+category = "Robotics"
+authors = ["OpenAI"]
+keywords = ["isaac sim", "visual programming", "scratch", "blocks"]
+readme = "docs/README.md"
+
+[dependencies]
+"omni.ui" = {}
+"omni.kit.uiapp" = {}
+"isaacsim.core.prims" = {}
+"isaacsim.core.simulation_manager" = {}
+"isaacsim.robot_motion.motion_generation" = {}
+
+[[python.module]]
+name = "com.example.scratch_blocks"
