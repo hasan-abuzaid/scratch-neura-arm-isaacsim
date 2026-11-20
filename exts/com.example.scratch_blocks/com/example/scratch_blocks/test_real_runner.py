@@ -170,7 +170,8 @@ class RealRunnerTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(finished, [(True, True)], statuses[-1])
         self.assertEqual(robot.gripper_name, "2FG7")                 # set_tool on this connection
-        self.assertEqual([a for a, _ in robot.gripper_log], ["close", "open"])
+        # INIT GRIPPER opens first (known start state), then close, then open
+        self.assertEqual([a for a, _ in robot.gripper_log], ["open", "close", "open"])
         self.assertEqual(len(robot.moves), 1)
         self.assertEqual(robot.stopped, 1)
         self.assertTrue(any("GRIPPER CLOSE (1.0 s)" in s for s in statuses), statuses)
@@ -190,7 +191,8 @@ class RealRunnerTests(unittest.IsolatedAsyncioTestCase):
             ("gripper", "close"),
             ("move_joint", {"joint_name": "lara8_joint1", "target_degrees": 10}),
         ], robot)
-        self.assertGreaterEqual(moves_at[0] - robot.gripper_log[0][1], 0.9)
+        close_at = next(t for a, t in robot.gripper_log if a == "close")
+        self.assertGreaterEqual(moves_at[0] - close_at, 0.9)
 
     async def test_gripper_without_init_gripper_refused_before_moving(self):
         robot, statuses, finished = await self.run_to_end([
@@ -216,9 +218,9 @@ class RealRunnerTests(unittest.IsolatedAsyncioTestCase):
         runner.start(blocks, offline_joint_target=target)
         while runner.is_running:
             await asyncio.sleep(0.02)
-        # sim told before each real command is sent (0, then 1 real commands done)
-        self.assertEqual(seen, [("close", 0), ("open", 1)])
-        self.assertEqual([a for a, _ in robot_.gripper_log], ["close", "open"])
+        # sim told before each real command is sent; INIT GRIPPER = open
+        self.assertEqual(seen, [("open", 0), ("close", 1), ("open", 2)])
+        self.assertEqual([a for a, _ in robot_.gripper_log], ["open", "close", "open"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

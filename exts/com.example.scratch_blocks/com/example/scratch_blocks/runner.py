@@ -175,9 +175,10 @@ class ProgramRunner:
                     if block.type == "set_speed":
                         self._on_status("REAL: Set Speed ignored - real moves use the fixed safe speed")
                         continue
-                    if block.type == "gripper" and self._on_real_gripper is not None:
+                    if block.type in ("gripper", "initialize_gripper") and self._on_real_gripper is not None:
                         try:
-                            self._on_real_gripper(str(block.value).strip().lower())
+                            self._on_real_gripper("open" if block.type == "initialize_gripper"
+                                                  else str(block.value).strip().lower())
                         except Exception as error:  # the sim view must never stop the real run
                             carb.log_warn(f"[Scratch Blocks] sim gripper mirror failed: {error}")
                     completed_detail = await self._in_thread(
@@ -250,7 +251,10 @@ class ProgramRunner:
                         raise RuntimeError("INIT GRIPPER requires INIT ROBOT before it.")
                     self._profile = control.attach_configured_gripper(
                         self._robot, self._profile, self._robot_path, block.value)
-                    completed_detail = (f"Gripper initialized: {block.value['gripper_path']} "
+                    # Known start state: INIT GRIPPER always opens the gripper.
+                    self._on_status("INIT GRIPPER: opening")
+                    await control.set_gripper(self._robot, self._profile, "open")
+                    completed_detail = (f"Gripper initialized and opened: {block.value['gripper_path']} "
                                         f"| profile={self._profile['gripper']['name']}")
                     print(f"[Scratch Blocks] {completed_detail}")
                     self._on_status(completed_detail)
@@ -435,7 +439,8 @@ class ProgramRunner:
             if not real_config:
                 raise ValueError(f"Gripper profile {config['name']} has no 'real' settings")
             tool = backend.select_gripper(real_config)
-            return f"NeuraPy | INIT GRIPPER {config['name']} (tool {tool})"
+            seconds = backend.gripper("open")   # known start state: always open
+            return f"NeuraPy | INIT GRIPPER {config['name']} (tool {tool}) | opened ({seconds:.1f} s)"
 
         if block.type == "gripper":
             action = str(block.value).strip().lower()

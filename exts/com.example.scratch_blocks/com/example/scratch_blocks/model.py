@@ -40,15 +40,10 @@ def validate_gripper_init_parameters(raw_value: Any, require_selection: bool = T
     """INIT GRIPPER: which gripper prim is mounted on the INIT ROBOT arm, and its profile."""
     if not isinstance(raw_value, dict):
         raise ValueError("INIT GRIPPER requires a gripper path and profile")
-    state = str(raw_value.get("start_state", "")).strip().lower()
-    state = {"close": "closed", "unknown": ""}.get(state, state)
-    if state not in ("", "open", "closed"):
-        raise ValueError("INIT GRIPPER start state must be open, closed or unknown")
-    # start_state: what the REAL gripper is doing when the session starts,
-    # set by hand (NeuraPy cannot read the finger position). "" = unknown.
+    # INIT GRIPPER always OPENS the gripper (sim and real), so its state is known
+    # without reading it (NeuraPy cannot read the 2FG7's finger position).
     value = {"gripper_path": str(raw_value.get("gripper_path", "")).strip(),
-             "profile": str(raw_value.get("profile", "")).strip(),
-             "start_state": state}
+             "profile": str(raw_value.get("profile", "")).strip()}
     if require_selection and (not value["gripper_path"].startswith("/") or not value["profile"]):
         raise ValueError("INIT GRIPPER: choose a gripper from the block's menu")
     return value
@@ -121,7 +116,7 @@ class ProgramBlock:
         elif block_type == "initialize_robot":
             value = {"robot_path": "/panda", "profile": "franka"}
         elif block_type == "initialize_gripper":
-            value = {"gripper_path": "", "profile": "", "start_state": ""}
+            value = {"gripper_path": "", "profile": ""}
         elif block_type == "robot_properties":
             # Keine Eingabe erforderlich; liest den zuvor initialisierten Roboter.
             value = ""
