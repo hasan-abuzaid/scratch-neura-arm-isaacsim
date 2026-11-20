@@ -5,7 +5,7 @@ import json
 import math
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 
 import carb.tokens
 import carb.input
@@ -151,7 +151,11 @@ class ScratchBlocksWindow(ui.Window):
         self._drop_handled = False
         self._press: tuple[float, float, float, float] | None = None
         self._runner = ProgramRunner(self._set_status, self._set_active_block,
-                                     on_finished=self._on_run_finished)
+                                     on_finished=self._on_run_finished,
+                                     on_real_gripper=self._mirror_real_gripper)
+        # Last open/close sent to the REAL gripper (NeuraPy cannot read it back).
+        # None = unknown since Isaac Sim started; Sync then leaves the sim gripper as is.
+        self._real_gripper_state: str | None = None
         # --- Act on real robot -------------------------------------------
         self._sim_arm = None            # Isaac Sim handle created by Sync
         self._real_reader = None        # NeuraPy connection used for reading/mirror
@@ -167,6 +171,8 @@ class ScratchBlocksWindow(ui.Window):
         data_root = carb.tokens.get_tokens_interface().resolve("${data}")
         self._save_path = os.path.join(data_root, "scratch_blocks_demo", "canvas_program.json")
         self._robot_menu = None
+        self._gripper_init_menu = None
+        self._gripper_state_menu = None
         self._joint_menu = None
         self._gripper_menu = None
         self._open_menu_widget = None
@@ -211,6 +217,8 @@ class ScratchBlocksWindow(ui.Window):
         self.frame.set_build_fn(self._build_ui)
 
     def destroy(self) -> None:
+        self._gripper_init_menu = None
+        self._gripper_state_menu = None
         self._robot_menu = None
         self._joint_menu = None
         self._gripper_menu = None
@@ -327,7 +335,8 @@ class ScratchBlocksWindow(ui.Window):
                     ("move_linear", "Move Linear (absolute)", "move_linear_block.svg"),
                     ("move_relative", "Move Relative", "move_linear_block.svg"),
                     ("set_speed", "Set Joint Speed (deg/s)", "move_joint_block.svg"))),
-        ("GRIPPER", (("gripper", "Gripper open / close", "gripper_block.svg"),)),
+        ("GRIPPER", (("initialize_gripper", "Initialize Gripper", "initialize_robot_block.svg"),
+                     ("gripper", "Gripper open / close", "gripper_block.svg"))),
         ("CONTROL", (("wait", "Wait seconds", "wait_block.svg"),
                      ("repeat", "Repeat (box)", "repeat_block.svg"),
                      ("stop_program", "Stop Program", "stop_program_block.svg"))),
@@ -504,6 +513,8 @@ class ScratchBlocksWindow(ui.Window):
             return 178.0
         if block.type == "stop_program":
             return 126.0
+        if block.type == "initialize_gripper":
+            return 100.0
         if block.type in ("initialize_robot", "set_speed", "move_joint", "move_linear",
                           "move_relative", "gripper", "repeat", "end_repeat"):
             return 90.0
@@ -1127,6 +1138,7 @@ class ScratchBlocksWindow(ui.Window):
             "print": "print_block.svg",
             "wait": "wait_block.svg",
             "initialize_robot": "initialize_robot_block.svg",
+            "initialize_gripper": "initialize_robot_block.svg",
             "robot_properties": "robot_properties_block.svg",
             "set_speed": "move_joint_block.svg",
             "move_all_joints": "move_joint_block.svg",
@@ -1176,6 +1188,7 @@ class ScratchBlocksWindow(ui.Window):
                             "print": "PRINT",
                             "wait": "WAIT",
                             "initialize_robot": "INIT ROBOT",
+                            "initialize_gripper": "INIT GRIPPER",
                             "robot_properties": "ROBOT PROPERTIES",
                             "set_speed": "SPEED °/s",
                             "move_all_joints": "MOVE ALL JOINTS",
@@ -1200,8 +1213,8 @@ class ScratchBlocksWindow(ui.Window):
                         pass  # Dieser Block besitzt keine Eingabefelder.
                     elif block.type in ("move_all_joints", "move_joint", "move_linear", "move_relative", "gripper"):
                         ui.Spacer(width=ui.Pixel(175 * self._zoom))
-                    elif block.type in ("print", "initialize_robot"):
-                        slot_width = 185 if block.type == "initialize_robot" else 220
+                    elif block.type in ("print", "initialize_robot", "initialize_gripper"):
+                        slot_width = {"initialize_robot": 185, "initialize_gripper": 196}.get(block.type, 220)
                         ui.Spacer(width=ui.Pixel(slot_width * self._zoom))
                     else:
                         ui.Spacer(width=ui.Pixel(65 * self._zoom))
@@ -1213,7 +1226,7 @@ class ScratchBlocksWindow(ui.Window):
                     # Fixed gap: the flexible Spacer() pushed the delete button
                     # outside the colored block when the canvas was wide.
                     ui.Spacer(
-                        width=ui.Pixel((12 if block.type == "print" else 0 if block.type == "initialize_robot" else 104) * self._zoom)
+                        width=ui.Pixel((12 if block.type == "print" else 0 if block.type in ("initialize_robot", "initialize_gripper") else 104) * self._zoom)
                     )
                     # Reserve button space; clickable button is drawn separately
                     # above all blocks in _build_canvas().
@@ -1352,6 +1365,12 @@ class ScratchBlocksWindow(ui.Window):
             return
         scale = self._zoom
         is_init = block.type == "initialize_robot"
+        if block.type == "initialize_gripper":
+            left = (block.x + 6 + 100 + 6) * scale
+            top = (block.y + WIDGET_TOP) * scale
+            self._build_init_gripper_selector(block, left, top, ui.Pixel(118 * scale),
+                                              ui.Pixel(WIDGET_HEIGHT * scale))
+            return
         is_joint = block.type == "move_joint"
         is_all = block.type == "move_all_joints"
         is_linear = block.type in ("move_linear", "move_relative")
@@ -1848,8 +1867,13 @@ class ScratchBlocksWindow(ui.Window):
         best, best_count = None, 0
         for name, data in profiles.items():
             arm = list((data or {}).get("arm_joint_names", []))
-            if arm and set(arm) <= joints and len(arm) > best_count:
-                best, best_count = name, len(arm)
+            gripper = list(((data or {}).get("gripper") or {}).get("joint_names", []))
+            # Arm + mounted gripper are one robot: the profile matches only if
+            # its gripper joints are in the stage too; more matched joints wins.
+            if arm and set(arm) <= joints and set(gripper) <= joints:
+                count = len(arm) + len(gripper)
+                if count > best_count:
+                    best, best_count = name, count
         if best:
             return best
         robot_name = robot_path.lower().rsplit("/", 1)[-1]
@@ -1869,14 +1893,40 @@ class ScratchBlocksWindow(ui.Window):
         The stage is scanned at click time, so the list is always current.
         """
         value = validate_initialize_parameters(block.value)
+        on_press = lambda x, y, button, m, b_id=block.id: self._init_field_pressed(b_id, button)
+        path = value["robot_path"]
+        label_text = path.rstrip("/").rsplit("/", 1)[-1] or path  # /World/lara8 -> lara8
+        self._build_menu_field(left, top, width, height, label_text,
+                               f"{path}\nClick to choose the robot", on_press)
+
+    def _build_init_gripper_selector(self, block: ProgramBlock, left: float, top: float,
+                                     width: Any, height: Any) -> None:
+        """Gripper selector on the INIT GRIPPER block (same look as INIT ROBOT)."""
+        from .model import validate_gripper_init_parameters
+        value = validate_gripper_init_parameters(block.value, require_selection=False)
+        on_press = lambda x, y, button, m, b_id=block.id: self._init_gripper_field_pressed(b_id, button)
+        path = value["gripper_path"]
+        label_text = (path.rstrip("/").rsplit("/", 1)[-1] or path) if path else "choose gripper"
+        tooltip = (f"{path} (profile {value['profile']})\nClick to choose the gripper" if path
+                   else "Click to choose the gripper to mount on the INIT ROBOT arm")
+        self._build_menu_field(left, top, width, height, label_text, tooltip, on_press)
+        # Second field: the REAL gripper's state right now, set by hand.
+        scale = self._zoom
+        state = value["start_state"]
+        on_state = lambda x, y, button, m, b_id=block.id: self._gripper_state_field_pressed(b_id, button)
+        self._build_menu_field(left + 124 * scale, top, ui.Pixel(72 * scale), height,
+                               {"open": "open", "closed": "closed"}.get(state, "state?"),
+                               "State of the REAL gripper now (NeuraPy cannot read it).\n"
+                               "Set it once; Act on real keeps it up to date.", on_state)
+
+    def _build_menu_field(self, left: float, top: float, width: Any, height: Any,
+                          label_text: str, tooltip: str, on_press: Callable) -> None:
+        """White field with a down arrow that opens a menu (INIT ROBOT / INIT GRIPPER)."""
         scale = self._zoom
         font = max(8, int(13 * scale))
-        on_press = lambda x, y, button, m, b_id=block.id: self._init_field_pressed(b_id, button)
         # The field must also accept drops, otherwise a block released over it
         # (e.g. when snapping another block under INIT ROBOT) is ignored.
         drop = {"accept_drop_fn": self._accept_drop, "drop_fn": self._drop_on_canvas}
-        path = value["robot_path"]
-        short_name = path.rstrip("/").rsplit("/", 1)[-1] or path  # /World/lara8 -> lara8
         with ui.Placer(offset_x=ui.Pixel(left), offset_y=ui.Pixel(top),
                        width=width, height=height, stable_size=True):
             with ui.ZStack(width=width, height=height, style={"margin": 0}, **drop):  # margin 0: the window style {'margin': 7} would shrink these widgets
@@ -1884,10 +1934,10 @@ class ScratchBlocksWindow(ui.Window):
                              style={"background_color": 0xFFFFFFFF, "border_radius": 10})
                 with ui.HStack(width=width, height=height):
                     ui.Spacer(width=ui.Pixel(8 * scale))
-                    ui.Label(short_name, height=height,
+                    ui.Label(label_text, height=height,
                              alignment=ui.Alignment.LEFT_CENTER, elided_text=True,
                              mouse_pressed_fn=on_press, **drop,
-                             tooltip=f"{path}\nClick to choose the robot",
+                             tooltip=tooltip,
                              style={"color": 0xFF202020, "font_size": font})
                     # Drawn arrow: the Isaac Sim UI font has no "\u25BC" glyph (showed "?").
                     with ui.VStack(width=ui.Pixel(24 * scale), height=height):
@@ -1953,6 +2003,7 @@ class ScratchBlocksWindow(ui.Window):
         changed, missing = retarget_joint_names(self._program, self._cached_joint_names(selection))
         self._all_joint_models.clear()  # Rebuild input fields for selected robot.
         self._joint_degree_models.clear()
+        self._remount_grippers()  # INIT GRIPPER follows the newly chosen arm.
         self._refresh_canvas()
         message = f"INIT ROBOT: {selection} (profile {profile})"
         if changed:
@@ -1960,6 +2011,176 @@ class ScratchBlocksWindow(ui.Window):
         if missing:
             message += f" - NOT on this robot: {', '.join(missing)}"
         self._set_status(message)
+
+    # ------------------------------------------------------------------
+    # INIT GRIPPER: choose a gripper in the stage; it is mounted on the
+    # flange of the arm from the INIT ROBOT block above (simulation stopped).
+    # ------------------------------------------------------------------
+    def _init_gripper_field_pressed(self, block_id: str, button: Any) -> None:
+        if self._runner.is_running or block_id not in self._program.blocks:
+            return
+        try:
+            if int(button) not in (0, 1):
+                return
+        except (TypeError, ValueError):
+            pass
+        asyncio.ensure_future(self._show_gripper_init_menu_next_frame(block_id))
+
+    @staticmethod
+    def _scan_grippers() -> list[str]:
+        try:
+            import omni.usd
+            from .gripper_mount import find_grippers
+            from .robot_profiles import gripper_profiles
+            stage = omni.usd.get_context().get_stage()
+            return find_grippers(stage, gripper_profiles()) if stage is not None else []
+        except Exception as error:
+            print(f"[Scratch Blocks] Gripper scan failed: {error}")
+            return []
+
+    async def _show_gripper_init_menu_next_frame(self, block_id: str) -> None:
+        import omni.kit.app
+        await omni.kit.app.get_app().next_update_async()
+        block = self._program.blocks.get(block_id)
+        if block is None:
+            return
+        from .model import validate_gripper_init_parameters
+        current = validate_gripper_init_parameters(block.value, require_selection=False)["gripper_path"]
+        grippers = self._scan_grippers()
+        self._gripper_init_menu = ui.Menu("INIT GRIPPER")
+        with self._gripper_init_menu:
+            if grippers:
+                for path in grippers:
+                    ui.MenuItem(
+                        path, checkable=True, checked=(path == current),
+                        triggered_fn=lambda b_id=block_id, p=path: self._init_gripper_selected(b_id, p),
+                    )
+            else:
+                ui.MenuItem("No gripper found: drag a gripper USD into the stage", enabled=False)
+            if current:
+                ui.Separator()
+                ui.MenuItem("Unmount gripper", triggered_fn=lambda b_id=block_id: self._init_gripper_selected(b_id, ""))
+        self._gripper_init_menu.show()
+
+    def _init_gripper_selected(self, block_id: str, selection: str) -> None:
+        asyncio.ensure_future(self._apply_init_gripper_next_frame(block_id, selection))
+
+    async def _apply_init_gripper_next_frame(self, block_id: str, selection: str) -> None:
+        import omni.kit.app
+        await omni.kit.app.get_app().next_update_async()
+        block = self._program.blocks.get(block_id)
+        if block is None or self._runner.is_running:
+            self._refresh_canvas()
+            return
+        try:
+            summary = self._mount_gripper_block(block, selection)
+        except Exception as error:
+            self._set_status(f"INIT GRIPPER: {error}")
+            carb.log_error(f"[Scratch Blocks] INIT GRIPPER failed: {error}")
+            return
+        self._invalidate_scene_cache()
+        self._refresh_canvas()
+        self._set_status(summary)
+        print(f"[Scratch Blocks] {summary}")
+
+    def _mount_gripper_block(self, block: ProgramBlock, selection: str) -> str:
+        """Mount (or unmount) the selected gripper on this block's INIT ROBOT arm."""
+        import omni.timeline
+        import omni.usd
+        from . import gripper_mount as gm
+        from .model import validate_gripper_init_parameters
+        from .robot_profiles import gripper_profiles
+        if omni.timeline.get_timeline_interface().is_playing():
+            raise RuntimeError("press Stop first - a gripper can only be mounted while the simulation is stopped")
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            raise RuntimeError("no USD stage loaded")
+        old = validate_gripper_init_parameters(block.value, require_selection=False)
+        if not selection:
+            if old["gripper_path"]:
+                gm.unmount(stage, old["gripper_path"])
+            block.value = {"gripper_path": "", "profile": "", "start_state": old["start_state"]}
+            return f"INIT GRIPPER: {old['gripper_path'] or 'gripper'} unmounted"
+        arm = self._robot_for_joint_block(block.id)
+        if arm is None:
+            raise RuntimeError("connect INIT GRIPPER under an INIT ROBOT block first")
+        profiles = gripper_profiles()
+        profile = gm.match_gripper_profile(stage, selection, profiles)
+        if profile is None:
+            raise RuntimeError(f"no gripper profile matches {selection}: add it to the "
+                               "'grippers' section of robot_profiles.json")
+        if old["gripper_path"] and old["gripper_path"] != selection:
+            gm.unmount(stage, old["gripper_path"])
+        summary = gm.mount(stage, arm["robot_path"], selection, self._cached_profile(arm["profile"]))
+        block.value = {"gripper_path": selection, "profile": profile, "start_state": old["start_state"]}
+        flange = summary["flange"].rsplit("/", 1)[-1]
+        return (f"INIT GRIPPER: {selection} mounted on {arm['robot_path']} at {flange} "
+                f"(profile {profile}) - press Play to use it")
+
+    def _gripper_state_field_pressed(self, block_id: str, button: Any) -> None:
+        if self._runner.is_running or block_id not in self._program.blocks:
+            return
+        try:
+            if int(button) not in (0, 1):
+                return
+        except (TypeError, ValueError):
+            pass
+        asyncio.ensure_future(self._show_gripper_state_menu_next_frame(block_id))
+
+    async def _show_gripper_state_menu_next_frame(self, block_id: str) -> None:
+        import omni.kit.app
+        await omni.kit.app.get_app().next_update_async()
+        block = self._program.blocks.get(block_id)
+        if block is None or block.type != "initialize_gripper" or self._runner.is_running:
+            return
+        from .model import validate_gripper_init_parameters
+        current = validate_gripper_init_parameters(block.value, require_selection=False)["start_state"]
+        self._gripper_state_menu = ui.Menu("Real gripper is now")
+        with self._gripper_state_menu:
+            for name, value in (("Open", "open"), ("Closed", "closed"), ("Unknown", "")):
+                ui.MenuItem(name, checkable=True, checked=(current == value),
+                            triggered_fn=lambda v=value, b_id=block_id: self._gripper_state_selected(b_id, v))
+        self._gripper_state_menu.show()
+
+    def _gripper_state_selected(self, block_id: str, state: str) -> None:
+        asyncio.ensure_future(self._apply_gripper_state_next_frame(block_id, state))
+
+    async def _apply_gripper_state_next_frame(self, block_id: str, state: str) -> None:
+        import omni.kit.app
+        await omni.kit.app.get_app().next_update_async()
+        block = self._program.blocks.get(block_id)
+        if block is None or block.type != "initialize_gripper" or self._runner.is_running:
+            return
+        from .model import validate_gripper_init_parameters
+        value = validate_gripper_init_parameters(block.value, require_selection=False)
+        block.value = {**value, "start_state": state}
+        # Setting it by hand = "this is what the real gripper is doing right now".
+        self._real_gripper_state = {"open": "open", "closed": "close"}.get(state)
+        message = f"INIT GRIPPER: real gripper set to {state or 'unknown'}"
+        if self._real_gripper_state and self._sim_arm is not None:
+            try:
+                self._set_sim_gripper(self._real_gripper_state, teleport=True)
+                message += " - simulated gripper moved to match"
+            except Exception as error:
+                message += f" (sim not updated: {error})"
+        self._invalidate()   # a validated run started from another gripper state
+        self._refresh_canvas()
+        self._set_status(message)
+
+    def _remount_grippers(self) -> None:
+        """After INIT ROBOT changes arm: move INIT GRIPPER grippers to the new arm."""
+        from .model import validate_gripper_init_parameters
+        for item in self._program.execution_blocks():
+            if item.type != "initialize_gripper":
+                continue
+            path = validate_gripper_init_parameters(item.value, require_selection=False)["gripper_path"]
+            if not path:
+                continue
+            try:
+                self._mount_gripper_block(item, path)
+            except Exception as error:
+                self._set_status(f"INIT GRIPPER: {error}")
+                carb.log_warn(f"[Scratch Blocks] gripper remount skipped: {error}")
 
     def _parameter_pressed(self, block_id: str, button: Any) -> None:
         if self._runner.is_running or block_id not in self._program.blocks:
@@ -1979,8 +2200,8 @@ class ScratchBlocksWindow(ui.Window):
             return
         if self._parameter_window is not None:
             self._parameter_window.visible = False
-        if block.type in ("set_speed", "repeat", "end_repeat", "stop_program"):
-            return  # Edited inline, or has no parameters.
+        if block.type in ("set_speed", "repeat", "end_repeat", "stop_program", "initialize_gripper"):
+            return  # Edited inline (INIT GRIPPER: menu on the block), or has no parameters.
         if block.type == "move_joint":
             return  # Joint and angle are edited directly inside the block.
         if block.type == "move_all_joints":
@@ -2517,7 +2738,8 @@ class ScratchBlocksWindow(ui.Window):
             self._sync_pose = angles
             self._invalidate()
             degrees = [round(math.degrees(a), 1) for a in angles]
-            self._set_status(f"Synced from real robot {degrees} deg - now press Run to validate")
+            gripper = self._sync_sim_gripper()
+            self._set_status(f"Synced from real robot {degrees} deg{gripper} - now press Run to validate")
             print(f"[Scratch Blocks][real] synced pose (deg): {degrees}")
         except Exception as error:
             self._set_status(f"Sync failed: {error}")
@@ -2535,7 +2757,90 @@ class ScratchBlocksWindow(ui.Window):
         if init is None:
             raise RuntimeError("the program needs an INIT ROBOT block")
         from .robot_init import initialize_robot
-        return initialize_robot(validate_initialize_parameters(init.value)["robot_path"])
+        from .robot_profiles import load_profile
+        from .arm_view import arm_view_for_profile
+        value = validate_initialize_parameters(init.value)
+        robot = initialize_robot(value["robot_path"])
+        # The real arm only knows its arm joints; hide mounted-gripper DOFs
+        # (e.g. finger_stroke) from Sync, validation and the real-run mirror.
+        return arm_view_for_profile(robot, load_profile(value["profile"]))
+
+    # --- simulated gripper follows the REAL gripper ---------------------
+    def _gripper_config(self) -> dict | None:
+        """Gripper of this program: INIT GRIPPER's profile, else the arm profile's own."""
+        from .model import validate_gripper_init_parameters
+        from .robot_profiles import load_gripper_profile, load_profile
+        blocks = self._program.execution_blocks()
+        for block in blocks:
+            if block.type == "initialize_gripper":
+                value = validate_gripper_init_parameters(block.value, require_selection=False)
+                if value["profile"]:
+                    return load_gripper_profile(value["profile"])
+        init = next((b for b in blocks if b.type == "initialize_robot"), None)
+        if init is not None:
+            return load_profile(validate_initialize_parameters(init.value)["profile"]).get("gripper")
+        return None
+
+    def _set_sim_gripper(self, action: str, teleport: bool) -> None:
+        """Open/close the simulated gripper. teleport=True also sets the fingers
+        there immediately (Sync); False only sends the drive target (live run)."""
+        import numpy as np
+        from isaacsim.core.utils.types import ArticulationAction
+        config = self._gripper_config()
+        if not config or self._sim_arm is None:
+            raise RuntimeError("no gripper configured in this program")
+        articulation = getattr(self._sim_arm, "_art", self._sim_arm)  # full arm+gripper
+        names = list(articulation.dof_names)
+        missing = [n for n in config["joint_names"] if n not in names]
+        if missing:
+            raise RuntimeError(f"gripper joints {missing} not in the simulated robot (mounted before Play?)")
+        indices = np.asarray([names.index(n) for n in config["joint_names"]], dtype=np.int32)
+        target = np.asarray(config["open_positions" if action == "open" else "closed_positions"], dtype=float)
+        if teleport:
+            articulation.set_joint_positions(target, joint_indices=indices)
+        articulation.apply_action(ArticulationAction(joint_positions=target, joint_indices=indices))
+
+    def _store_real_gripper_state(self) -> None:
+        """After a real run: show the real gripper's (commanded) state on INIT GRIPPER,
+        so it is saved with the project and correct at the next start."""
+        if self._real_gripper_state is None:
+            return
+        from .model import validate_gripper_init_parameters
+        state = "closed" if self._real_gripper_state == "close" else "open"
+        for block in self._program.blocks.values():
+            if block.type == "initialize_gripper":
+                value = validate_gripper_init_parameters(block.value, require_selection=False)
+                block.value = {**value, "start_state": state}
+        self._refresh_canvas()
+
+    def _mirror_real_gripper(self, action: str) -> None:
+        """Runner callback: the real gripper was just commanded -> sim follows."""
+        self._real_gripper_state = action
+        self._set_sim_gripper(action, teleport=False)
+
+    def _sync_sim_gripper(self) -> str:
+        """Part of Sync: put the sim gripper in the last state sent to the real one."""
+        try:
+            if self._gripper_config() is None:
+                return ""
+        except Exception:
+            return ""
+        if self._real_gripper_state is None:
+            # Nothing commanded yet in this session: use the state set by hand on INIT GRIPPER.
+            from .model import validate_gripper_init_parameters
+            for block in self._program.execution_blocks():
+                if block.type == "initialize_gripper":
+                    state = validate_gripper_init_parameters(block.value, require_selection=False)["start_state"]
+                    self._real_gripper_state = {"open": "open", "closed": "close"}.get(state)
+                    break
+        if self._real_gripper_state is None:
+            return " | gripper: unknown - set its state on the INIT GRIPPER block"
+        try:
+            self._set_sim_gripper(self._real_gripper_state, teleport=True)
+        except Exception as error:
+            return f" | gripper not synced: {error}"
+        state = "closed" if self._real_gripper_state == "close" else "open"
+        return f" | gripper: {state}"
 
     def _apply_sim_pose(self, angles: list[float]) -> None:
         import numpy as np
@@ -2566,6 +2871,7 @@ class ScratchBlocksWindow(ui.Window):
 
     def _on_run_finished(self, succeeded: bool, real: bool) -> None:
         if real:
+            self._store_real_gripper_state()
             asyncio.ensure_future(self._end_real_run(succeeded))
             return
         if succeeded and self._pending_validation is not None:
@@ -2702,6 +3008,13 @@ class ScratchBlocksWindow(ui.Window):
                 elif block.type == "initialize_robot":
                     init_value = validate_initialize_parameters(block.value)
                     profile = load_profile(init_value["profile"])
+                elif block.type == "initialize_gripper":
+                    if profile is None:
+                        raise ValueError("INIT GRIPPER requires INIT ROBOT before it")
+                    from .model import validate_gripper_init_parameters
+                    from .robot_profiles import load_gripper_profile, with_gripper
+                    gripper_value = validate_gripper_init_parameters(block.value)
+                    profile = with_gripper(profile, load_gripper_profile(gripper_value["profile"]))
                 elif block.type in ("robot_properties", "move_all_joints", "move_joint", "move_linear", "move_relative", "gripper"):
                     if profile is None:
                         raise ValueError(f"{block.type.upper()} requires INIT ROBOT before it")
@@ -2732,7 +3045,7 @@ class ScratchBlocksWindow(ui.Window):
                             raise ValueError("INIT profile has no linear kinematics")
                     elif block.type == "gripper":
                         if not profile.get("gripper"):
-                            raise ValueError("INIT profile has no gripper configuration")
+                            raise ValueError("No gripper: add INIT GRIPPER after INIT ROBOT")
                         if str(block.value).strip().lower() not in ("open", "close"):
                             raise ValueError("GRIPPER action must be open or close")
                 else:

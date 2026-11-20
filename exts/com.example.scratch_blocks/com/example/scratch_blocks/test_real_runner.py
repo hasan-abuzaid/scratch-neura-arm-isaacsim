@@ -38,6 +38,7 @@ class SlowRobot:
         self.angles = [0.0] * 6
         self.moves = []
         self.stopped = 0
+        self.gripper_log = []
 
     def is_robot_in_teach_mode(self):
         return False
@@ -56,6 +57,25 @@ class SlowRobot:
 
     def stop(self):
         self.stopped += 1
+
+    # Fake 2FG7, behaving like the lab test of 20 Nov 2026.
+    gripper_name = None
+    gripper_log: list
+
+    def set_tool(self, tool_name):
+        self.gripper_name = tool_name
+        return True
+
+    def release(self):                  # opens; took 0.41 s in the lab
+        if self.gripper_name is None:
+            raise RuntimeError("'Robot' object has no attribute 'gripper_name'")
+        time.sleep(0.4)
+        self.gripper_log.append(("open", time.monotonic()))
+
+    def grasp(self):                    # closes; returned after 0.03 s in the lab
+        if self.gripper_name is None:
+            raise RuntimeError("'Robot' object has no attribute 'gripper_name'")
+        self.gripper_log.append(("close", time.monotonic()))
 
 
 AXES = tuple(f"lara8_joint{i}" for i in range(1, 7))
@@ -114,7 +134,7 @@ class RealRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_block_fails_before_moving_further(self):
         robot, target, blocks = self.make([
             ("initialize_robot", ""),
-            ("gripper", "open"),
+            ("move_linear", {}),
             ("move_joint", {"joint_name": "lara8_joint1", "target_degrees": 10}),
         ])
         statuses = []
@@ -125,6 +145,80 @@ class RealRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(robot.moves, [])
         self.assertIn("not available on the real robot", statuses[-1])
 
+
+    async def run_to_end(self, actions, robot=None):
+        robot_, target, blocks = self.make(actions)
+        if robot is not None:
+            target = (NeuraPyBackend(robot, speed_percent=10.0, acceleration_percent=10.0,
+                                     override=0.2), AXES)
+            robot_ = robot
+        statuses, finished = [], []
+        runner = ProgramRunner(statuses.append, lambda _id: None,
+                               on_finished=lambda ok, real: finished.append((ok, real)))
+        runner.start(blocks, offline_joint_target=target)
+        while runner.is_running:
+            await asyncio.sleep(0.02)
+        return robot_, statuses, finished
+
+    async def test_real_gripper_close_move_open(self):
+        robot, statuses, finished = await self.run_to_end([
+            ("initialize_robot", ""),
+            ("initialize_gripper", {"gripper_path": "/World/onrobot_2fg7", "profile": "onrobot_2fg7"}),
+            ("gripper", "close"),
+            ("move_joint", {"joint_name": "lara8_joint1", "target_degrees": 10}),
+            ("gripper", "open"),
+        ])
+        self.assertEqual(finished, [(True, True)], statuses[-1])
+        self.assertEqual(robot.gripper_name, "2FG7")                 # set_tool on this connection
+        self.assertEqual([a for a, _ in robot.gripper_log], ["close", "open"])
+        self.assertEqual(len(robot.moves), 1)
+        self.assertEqual(robot.stopped, 1)
+        self.assertTrue(any("GRIPPER CLOSE (1.0 s)" in s for s in statuses), statuses)
+
+    async def test_close_waits_before_next_block(self):
+        """grasp() returns at once; the next move must wait for the fingers."""
+        robot = SlowRobot()
+        moves_at = []
+        original = robot.move_joint
+        def move_joint(target_joint, **kw):
+            moves_at.append(time.monotonic())
+            return original(target_joint, **kw)
+        robot.move_joint = move_joint
+        await self.run_to_end([
+            ("initialize_robot", ""),
+            ("initialize_gripper", {"gripper_path": "/g", "profile": "onrobot_2fg7"}),
+            ("gripper", "close"),
+            ("move_joint", {"joint_name": "lara8_joint1", "target_degrees": 10}),
+        ], robot)
+        self.assertGreaterEqual(moves_at[0] - robot.gripper_log[0][1], 0.9)
+
+    async def test_gripper_without_init_gripper_refused_before_moving(self):
+        robot, statuses, finished = await self.run_to_end([
+            ("initialize_robot", ""),
+            ("move_joint", {"joint_name": "lara8_joint1", "target_degrees": 10}),
+            ("gripper", "close"),
+        ])
+        self.assertEqual(robot.moves, [])
+        self.assertEqual(robot.gripper_log, [])
+        self.assertIn("needs INIT GRIPPER", statuses[-1])
+        self.assertEqual(finished, [(False, True)])
+
+    async def test_sim_gripper_follows_real_commands(self):
+        robot_, target, blocks = self.make([
+            ("initialize_robot", ""),
+            ("initialize_gripper", {"gripper_path": "/g", "profile": "onrobot_2fg7"}),
+            ("gripper", "close"),
+            ("gripper", "open"),
+        ])
+        seen = []
+        runner = ProgramRunner(lambda s: None, lambda _id: None,
+                               on_real_gripper=lambda a: seen.append((a, len(robot_.gripper_log))))
+        runner.start(blocks, offline_joint_target=target)
+        while runner.is_running:
+            await asyncio.sleep(0.02)
+        # sim told before each real command is sent (0, then 1 real commands done)
+        self.assertEqual(seen, [("close", 0), ("open", 1)])
+        self.assertEqual([a for a, _ in robot_.gripper_log], ["close", "open"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

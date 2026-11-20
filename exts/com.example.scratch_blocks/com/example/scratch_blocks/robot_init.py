@@ -34,6 +34,15 @@ def initialize_robot(robot_path: str):
     from .robot_scan import articulation_root_of
     articulation_path = articulation_root_of(robot_path)
 
+    from pxr import UsdPhysics
+    root_prim = stage.GetPrimAtPath(articulation_path)
+    if not root_prim.IsValid() or not root_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+        raise RuntimeError(
+            f"Keine Articulation unter {robot_path}. Ist das ein Greifer, der am "
+            "Roboter montiert ist? Dann im INIT ROBOT den Roboter waehlen - "
+            "Arm und Greifer werden zusammen initialisiert."
+        )
+
     robot = SingleArticulation(
         prim_path=articulation_path,
         name="selected_robot"

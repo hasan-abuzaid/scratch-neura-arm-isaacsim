@@ -5,6 +5,7 @@ Inside Isaac Sim, call them from a worker thread, never from the main thread.
 """
 
 from math import isfinite, radians
+import time
 
 
 class NeuraPyBackend:
@@ -21,6 +22,7 @@ class NeuraPyBackend:
         self._speed = speed_percent
         self._acceleration = acceleration_percent
         self._override = override
+        self._gripper: dict | None = None   # real-gripper config after select_gripper()
 
     def initialize(self) -> tuple[str, int]:
         """Check the robot can move, read name and joint count, apply the override."""
@@ -65,6 +67,45 @@ class NeuraPyBackend:
         targets = list(current)
         targets[axis_index] = radians(target_degrees)
         self._move_joint_vector(targets, current if self._speed is not None else None)
+
+    def select_gripper(self, real_config: dict) -> str:
+        """INIT GRIPPER on the real arm: activate the tool for this connection.
+
+        Lab result 20 Nov 2026: grasp()/release() fail with "'Robot' object has
+        no attribute 'gripper_name'" until set_tool() is called on the SAME
+        connection, even when the tool is already selected on the controller.
+        """
+        name = str(real_config.get("tool_name", "")).strip()
+        if not name:
+            raise ValueError("Gripper profile has no real tool_name")
+        for key in ("open_call", "close_call"):
+            if not str(real_config.get(key, "")).strip():
+                raise ValueError(f"Gripper profile has no real {key}")
+        if self._robot.set_tool(tool_name=name) is False:
+            raise RuntimeError(f"NeuraPy refused set_tool('{name}')")
+        self._gripper = dict(real_config)
+        return name
+
+    def gripper(self, action: str) -> float:
+        """Open or close the real gripper, then wait until it has had time to move.
+
+        Lab result 20 Nov 2026 (2FG7): release() returned after 0.41 s, grasp()
+        after 0.03 s while the fingers were still moving - so a fixed minimum
+        time is waited after every command. Returns the seconds taken.
+        """
+        if self._gripper is None:
+            raise RuntimeError("INIT GRIPPER is required before GRIPPER on the real robot.")
+        if action not in ("open", "close"):
+            raise ValueError("GRIPPER action must be open or close")
+        call = getattr(self._robot, self._gripper[f"{action}_call"])
+        settle = float(self._gripper.get("settle_seconds", 1.0))
+        started = time.monotonic()
+        if call() is False:
+            raise RuntimeError(f"NeuraPy did not confirm gripper {action}")
+        remaining = settle - (time.monotonic() - started)
+        if remaining > 0:
+            time.sleep(remaining)
+        return time.monotonic() - started
 
     def finish(self) -> None:
         """End the NeuraPy script properly (manual: call stop() once at the end)."""

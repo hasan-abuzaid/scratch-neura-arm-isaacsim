@@ -21,12 +21,16 @@ class ProgramRunner:
         on_status: Callable[[str], None],
         on_active_block: Callable[[str | None], None],
         on_finished: Callable[[bool, bool], None] | None = None,
+        on_real_gripper: Callable[[str], None] | None = None,
     ) -> None:
 
         self._on_status = on_status
         self._on_active_block = on_active_block
         # Called once per run: on_finished(success, real_robot).
         self._on_finished = on_finished
+        # Called on the main thread when the REAL gripper is commanded ("open"/"close"),
+        # so the simulated gripper can follow (NeuraPy cannot read the finger position).
+        self._on_real_gripper = on_real_gripper
 
         self._task: asyncio.Task | None = None
         self._robot = None
@@ -128,6 +132,7 @@ class ProgramRunner:
         joint_speed = None  # No speed block: preserve existing movement behavior.
         # Require an INIT ROBOT block in each new run.
         self._robot = None
+        self._robot_path = None
         self._linear_plan = None
         self._profile = None
 
@@ -135,6 +140,13 @@ class ProgramRunner:
             if offline_joint_target is not None:
                 if not blocks or blocks[0].type != "initialize_robot":
                     raise ValueError("Offline NeuraPy runs must start with INIT ROBOT.")
+                # Refuse BEFORE the first move, not halfway through the program.
+                gripper_ready = False
+                for item in blocks:
+                    if item.type == "initialize_gripper":
+                        gripper_ready = True
+                    elif item.type == "gripper" and not gripper_ready:
+                        raise ValueError("GRIPPER on the real robot needs INIT GRIPPER before it.")
 
             for block in blocks:
 
@@ -163,6 +175,11 @@ class ProgramRunner:
                     if block.type == "set_speed":
                         self._on_status("REAL: Set Speed ignored - real moves use the fixed safe speed")
                         continue
+                    if block.type == "gripper" and self._on_real_gripper is not None:
+                        try:
+                            self._on_real_gripper(str(block.value).strip().lower())
+                        except Exception as error:  # the sim view must never stop the real run
+                            carb.log_warn(f"[Scratch Blocks] sim gripper mirror failed: {error}")
                     completed_detail = await self._in_thread(
                         self._run_offline_joint_block, block, *offline_joint_target
                     )
@@ -212,6 +229,7 @@ class ProgramRunner:
                     robot_path = init_value["robot_path"]
                     self._on_status(f"Initializing {robot_path} | profile={init_value['profile']}")
                     self._robot, self._profile = control.initialize_configured_robot(init_value)
+                    self._robot_path = robot_path
                     carb.log_info(f"[Scratch Blocks] Profile selected: {self._profile['name']}")
 
                     print(
@@ -224,6 +242,18 @@ class ProgramRunner:
                     )
 
                     carb.log_info(f"[Scratch Blocks] Robot initialized: {robot_path}")
+                    await asyncio.sleep(0)
+
+                # INIT GRIPPER: use the gripper mounted on the INIT ROBOT arm.
+                elif block.type == "initialize_gripper":
+                    if self._robot is None:
+                        raise RuntimeError("INIT GRIPPER requires INIT ROBOT before it.")
+                    self._profile = control.attach_configured_gripper(
+                        self._robot, self._profile, self._robot_path, block.value)
+                    completed_detail = (f"Gripper initialized: {block.value['gripper_path']} "
+                                        f"| profile={self._profile['gripper']['name']}")
+                    print(f"[Scratch Blocks] {completed_detail}")
+                    self._on_status(completed_detail)
                     await asyncio.sleep(0)
 
                 # ROBOT PROPERTIES: use the robot initialized in this run.
@@ -397,5 +427,19 @@ class ProgramRunner:
                 raise ValueError("MOVE ALL requires one angle per controller axis.")
             backend.move_all_joints([targets[name] for name in axis_names])
             return "NeuraPy offline | MOVE ALL"
+
+        if block.type == "initialize_gripper":
+            from .robot_profiles import load_gripper_profile
+            config = load_gripper_profile(str(block.value.get("profile", "")))
+            real_config = config.get("real")
+            if not real_config:
+                raise ValueError(f"Gripper profile {config['name']} has no 'real' settings")
+            tool = backend.select_gripper(real_config)
+            return f"NeuraPy | INIT GRIPPER {config['name']} (tool {tool})"
+
+        if block.type == "gripper":
+            action = str(block.value).strip().lower()
+            seconds = backend.gripper(action)
+            return f"NeuraPy | GRIPPER {action.upper()} ({seconds:.1f} s)"
 
         raise ValueError(f"Block is not available on the real robot in this version: {block.type}")

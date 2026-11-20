@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 
-SUPPORTED_BLOCKS = {"set_speed", "print", "wait", "initialize_robot", "robot_properties", "move_joint", "move_all_joints", "move_linear", "move_relative", "gripper", "repeat", "end_repeat", "stop_program"}
+SUPPORTED_BLOCKS = {"set_speed", "print", "wait", "initialize_robot", "initialize_gripper", "robot_properties", "move_joint", "move_all_joints", "move_linear", "move_relative", "gripper", "repeat", "end_repeat", "stop_program"}
 BLOCK_WIDTH = 360
 BLOCK_HEIGHT = 52
 # Isaac Sim DPI-scales the SVG widget while ui.Placer uses canvas offsets.
@@ -33,6 +33,24 @@ def validate_initialize_parameters(raw_value: Any) -> dict[str, str]:
         raise ValueError("INIT ROBOT requires a Prim path and profile")
     if not value["robot_path"].startswith("/") or not value["profile"]:
         raise ValueError("INIT ROBOT requires an absolute Prim path and a profile name")
+    return value
+
+
+def validate_gripper_init_parameters(raw_value: Any, require_selection: bool = True) -> dict[str, str]:
+    """INIT GRIPPER: which gripper prim is mounted on the INIT ROBOT arm, and its profile."""
+    if not isinstance(raw_value, dict):
+        raise ValueError("INIT GRIPPER requires a gripper path and profile")
+    state = str(raw_value.get("start_state", "")).strip().lower()
+    state = {"close": "closed", "unknown": ""}.get(state, state)
+    if state not in ("", "open", "closed"):
+        raise ValueError("INIT GRIPPER start state must be open, closed or unknown")
+    # start_state: what the REAL gripper is doing when the session starts,
+    # set by hand (NeuraPy cannot read the finger position). "" = unknown.
+    value = {"gripper_path": str(raw_value.get("gripper_path", "")).strip(),
+             "profile": str(raw_value.get("profile", "")).strip(),
+             "start_state": state}
+    if require_selection and (not value["gripper_path"].startswith("/") or not value["profile"]):
+        raise ValueError("INIT GRIPPER: choose a gripper from the block's menu")
     return value
 
 
@@ -102,6 +120,8 @@ class ProgramBlock:
             value = ""
         elif block_type == "initialize_robot":
             value = {"robot_path": "/panda", "profile": "franka"}
+        elif block_type == "initialize_gripper":
+            value = {"gripper_path": "", "profile": "", "start_state": ""}
         elif block_type == "robot_properties":
             # Keine Eingabe erforderlich; liest den zuvor initialisierten Roboter.
             value = ""
@@ -132,6 +152,8 @@ class ProgramBlock:
             block_type = "move_relative"
         if block_type == "initialize_robot":
             value = validate_initialize_parameters(raw_value)
+        elif block_type == "initialize_gripper":
+            value = validate_gripper_init_parameters(raw_value, require_selection=False)
         elif block_type == "gripper":
             value = str(raw_value).strip().lower()
             if value not in ("open", "close"):

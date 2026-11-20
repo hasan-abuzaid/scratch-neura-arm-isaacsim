@@ -16,6 +16,25 @@ def initialize_configured_robot(parameters):
     return robot, profile
 
 
+def attach_configured_gripper(robot, profile, robot_path, parameters):
+    """INIT GRIPPER at run time: the gripper must already be mounted on this arm
+    (done when it was chosen in the block, with the simulation stopped)."""
+    import omni.usd
+    from .gripper_mount import check_mounted
+    from .model import validate_gripper_init_parameters
+    from .robot_profiles import load_gripper_profile, with_gripper
+    value = validate_gripper_init_parameters(parameters)
+    stage = omni.usd.get_context().get_stage()
+    check_mounted(stage, robot_path, value["gripper_path"])
+    config = load_gripper_profile(value["profile"])
+    names = list(robot.dof_names)
+    missing = [n for n in config.get("joint_names", []) if n not in names]
+    if missing:
+        raise RuntimeError(f"Gripper joints {missing} are not part of {robot_path}'s articulation. "
+                           "The gripper was probably mounted while playing: press Stop, then Play again.")
+    return with_gripper(profile, config)
+
+
 def get_robot_properties(robot):
     from .robot_init import get_robot_properties as read
     return read(robot)

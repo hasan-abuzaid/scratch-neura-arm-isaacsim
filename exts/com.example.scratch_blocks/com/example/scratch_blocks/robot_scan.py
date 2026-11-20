@@ -53,6 +53,22 @@ def find_articulation_roots() -> list[str]:
         if root not in robots and not any(_is_inside(root, robot) for robot in robots):
             robots.append(root)
 
+    # A tool mounted on an arm (e.g. the 2FG7 under /World/lara8/.../lara8_flange)
+    # keeps its IsaacRobotAPI but is part of the arm's articulation, not a robot
+    # of its own. Only the outermost robot prim is offered in INIT ROBOT.
+    robots = [r for r in robots
+              if not any(other != r and _is_inside(r, other) for other in robots)]
+
+    # Grippers are chosen in INIT GRIPPER, not INIT ROBOT.
+    try:
+        from .gripper_mount import find_grippers
+        from .robot_profiles import gripper_profiles
+        grippers = find_grippers(stage, gripper_profiles())
+        robots = [r for r in robots
+                  if not any(_is_inside(r, g) for g in grippers)]
+    except Exception as error:  # never block the robot menu
+        print(f"[Scratch Blocks] Gripper filter skipped: {error}")
+
     print(f"[Scratch Blocks] Robots in stage: {robots}")
     return robots
 

@@ -22,6 +22,7 @@ START_POSE_TOLERANCE_DEG = 0.5  # real arm must still be at the validated start 
 REAL_BLOCK_TYPES = {
     "initialize_robot", "move_joint", "move_all_joints", "wait", "set_speed",
     "print", "repeat", "end_repeat", "stop_program",
+    "initialize_gripper", "gripper",   # 2FG7 via set_tool + release()/grasp(), lab-tested 20 Nov 2026
 }
 
 

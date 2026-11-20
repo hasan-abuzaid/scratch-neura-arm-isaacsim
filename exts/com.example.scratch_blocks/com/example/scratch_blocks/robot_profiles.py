@@ -28,6 +28,33 @@ def load_profile(name: str) -> dict:
     return profile
 
 
+def gripper_profiles() -> dict:
+    """All configured grippers ("grippers" section of robot_profiles.json)."""
+    with open(PROFILE_FILE, encoding="utf-8") as stream:
+        data = json.load(stream)
+    grippers = data.get("grippers", {})
+    if not isinstance(grippers, dict):
+        raise ValueError("Invalid 'grippers' section in robot_profiles.json")
+    return copy.deepcopy(grippers)
+
+
+def load_gripper_profile(name: str) -> dict:
+    grippers = gripper_profiles()
+    if name not in grippers:
+        raise ValueError(f"Unknown gripper profile '{name}'. Available: {list(grippers)} "
+                         "(add the gripper to the 'grippers' section of robot_profiles.json)")
+    config = grippers[name]
+    config["name"] = name
+    return config
+
+
+def with_gripper(profile: dict, gripper_config: dict) -> dict:
+    """Arm profile + a mounted gripper: the GRIPPER block then uses this gripper."""
+    combined = copy.deepcopy(profile)
+    combined["gripper"] = copy.deepcopy(gripper_config)
+    return combined
+
+
 def resolve_joint(profile: dict, name: str) -> str:
     actual = profile.get("joint_aliases", {}).get(name, name)
     if actual not in profile.get("arm_joint_names", []):

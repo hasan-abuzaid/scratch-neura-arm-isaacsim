@@ -16,12 +16,53 @@
         "timeout_seconds": 5.0
       }
     },
+    "lara8": {
+      "label": "NEURA LARA 8 (mount any gripper with INIT GRIPPER)",
+      "arm_joint_names": ["lara8_joint1", "lara8_joint2", "lara8_joint3", "lara8_joint4", "lara8_joint5", "lara8_joint6"],
+      "joint_aliases": {"joint1": "lara8_joint1", "joint2": "lara8_joint2", "joint3": "lara8_joint3", "joint4": "lara8_joint4", "joint5": "lara8_joint5", "joint6": "lara8_joint6"},
+      "tool_flange": {"link": "lara8_link6", "frame": "lara8_flange"},
+      "kinematics": null,
+      "gripper": null
+    },
+    "lara8_2fg7": {
+      "label": "NEURA LARA 8 + OnRobot 2FG7 on the flange (one articulation)",
+      "arm_joint_names": ["lara8_joint1", "lara8_joint2", "lara8_joint3", "lara8_joint4", "lara8_joint5", "lara8_joint6"],
+      "joint_aliases": {"joint1": "lara8_joint1", "joint2": "lara8_joint2", "joint3": "lara8_joint3", "joint4": "lara8_joint4", "joint5": "lara8_joint5", "joint6": "lara8_joint6"},
+      "kinematics": null,
+      "gripper": {
+        "joint_names": ["finger_stroke"],
+        "open_positions": [0.019],
+        "closed_positions": [0.0],
+        "position_unit": "m",
+        "tolerance": 0.001,
+        "duration_seconds": 1.0,
+        "timeout_seconds": 5.0
+      }
+    },
     "generic": {
       "label": "Unconfigured articulation: initialize, properties, wait only",
       "arm_joint_names": [],
       "joint_aliases": {},
       "kinematics": null,
       "gripper": null
+    }
+  },
+  "grippers": {
+    "onrobot_2fg7": {
+      "label": "OnRobot 2FG7 parallel gripper",
+      "joint_names": ["finger_stroke"],
+      "open_positions": [0.019],
+      "closed_positions": [0.0],
+      "position_unit": "m",
+      "tolerance": 0.001,
+      "duration_seconds": 1.0,
+      "timeout_seconds": 5.0,
+      "real": {
+        "tool_name": "2FG7",
+        "open_call": "release",
+        "close_call": "grasp",
+        "settle_seconds": 1.0
+      }
     }
   }
 }

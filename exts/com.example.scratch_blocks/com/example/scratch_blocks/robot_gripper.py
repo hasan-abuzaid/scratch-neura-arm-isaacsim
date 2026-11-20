@@ -39,8 +39,14 @@ def gripper_parameters(robot, profile: dict, action: str):
     limits = np.asarray(robot._articulation_view.get_dof_limits(), dtype=float)
     if limits.ndim == 3:
         limits = limits[0]
-    if not np.all((target >= limits[indices, 0]) & (target <= limits[indices, 1])):
-        raise ValueError("Configured gripper target is outside loaded robot joint limits")
+    # PhysX stores limits as float32: 0.019 m reads back as 0.0189999994.
+    # Accept targets within a micrometre/microradian of a limit and clamp them.
+    lower, upper = limits[indices, 0], limits[indices, 1]
+    epsilon = 1e-6
+    if not np.all((target >= lower - epsilon) & (target <= upper + epsilon)):
+        raise ValueError(f"Configured gripper target {target.tolist()} is outside loaded "
+                         f"robot joint limits {np.stack([lower, upper], axis=1).tolist()}")
+    target = np.clip(target, lower, upper)
     return indices, target, tolerance, duration, timeout
 
 
