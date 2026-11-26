@@ -14,156 +14,100 @@ from isaacsim.core.utils.types import ArticulationAction
 async def execute_linear_plan(
     robot,
     plan: dict,
-    duration: float = 2.0,
-    sections: int = 1,
-    steps_per_section: int = 40,
+    total_seconds: float = 10.0,
 ):
     """
-    Fuehrt einen vorberechneten Gelenkweg aus.
+    Plays the dense IK waypoints of a straight Cartesian line.
 
-    Die kartesische Bahn wird angenaehert.
-    Gelenkpositionen werden zur Diagnose zurueckgelesen.
-    Dies ist keine unabhaengige kartesische Bahnvermessung.
-
-    Nur fuer Isaac-Sim-Simulation vorgesehen.
-    Die neue Scratch-Anbindung ist noch in der Simulation zu validieren.
+    - timed in SIMULATION time (physics steps), smooth start/stop (smoothstep)
+    - between two neighbouring waypoints (~5 mm apart) joints are interpolated
+    - every command carries zero velocity targets, so no leftover velocity
+      target of an earlier move can pull the joints off their positions
+    Only for Isaac Sim simulation.
     """
+    import omni.kit.app
+    import omni.physx
 
     timeline = omni.timeline.get_timeline_interface()
-
     if not timeline.is_playing():
         raise RuntimeError("Simulation nicht gestartet.")
 
-    waypoints = np.asarray(
-        plan["waypoints"], dtype=float
-    )
-
-    indices = np.asarray(
-        plan["joint_indices"], dtype=np.int32
-    )
-
-    if waypoints.ndim != 2:
+    waypoints = np.asarray(plan["waypoints"], dtype=float)
+    indices = np.asarray(plan["joint_indices"], dtype=np.int32)
+    if waypoints.ndim != 2 or len(waypoints) < 2:
         raise ValueError("Ungueltige Wegpunkte.")
-
-    if not 1 <= sections < len(waypoints):
-        raise ValueError("Ungueltige Abschnittsanzahl.")
-
     if not np.all(np.isfinite(waypoints)):
         raise ValueError("Ungueltige Gelenkwerte.")
-
-    if not np.isfinite(duration) or duration <= 0:
-        raise ValueError("Ungueltige Dauer.")
-
-    if steps_per_section < 1:
-        raise ValueError("Ungueltige Schrittanzahl.")
-
     if waypoints.shape[1] != len(indices):
         raise ValueError("Gelenkanzahl stimmt nicht.")
+    total_seconds = float(total_seconds)
+    if not np.isfinite(total_seconds) or total_seconds <= 0:
+        raise ValueError("Ungueltige Dauer.")
 
-    # Pruefen, ob der Roboter noch an der
-    # Startkonfiguration steht.
-    current = np.asarray(
-        robot.get_joint_positions(), dtype=float
-    ).reshape(-1)[indices]
+    # Start check: still at the planned start pose (robot_control waits for
+    # standstill before planning, so no velocity check here).
+    current = np.asarray(robot.get_joint_positions(), dtype=float).reshape(-1)[indices]
     if not np.all(np.isfinite(current)):
         raise RuntimeError("Ungueltige aktuelle Gelenkpositionen.")
+    if float(np.max(np.abs(current - waypoints[0]))) >= 0.01:
+        raise RuntimeError("Startposition stimmt nicht mehr. Bitte Bahn neu berechnen.")
 
-    start_error = float(
-        np.max(np.abs(current - waypoints[0]))
-    )
-
-    if start_error >= 0.01:
-        raise RuntimeError(
-            "Startposition stimmt nicht mehr. "
-            "Bitte Bahn neu berechnen."
-        )
-
-    velocities = np.asarray(
-        robot.get_joint_velocities()
-    ).reshape(-1)[indices]
-
-    if not np.all(np.isfinite(velocities)):
-        raise RuntimeError("Ungueltige Gelenkgeschwindigkeiten.")
-
-    if np.max(np.abs(velocities)) >= 0.02:
-        raise RuntimeError(
-            "Roboter bewegt sich noch."
-        )
-
+    sections = len(waypoints) - 1
+    zero_velocity = np.zeros(len(indices))
     print("=== MOVE LINEAR AUSFUEHRUNG ===")
-    print("Startkontrolle erfolgreich.")
-    print("Abschnitte:", sections)
+    print(f"Startkontrolle erfolgreich. {len(waypoints)} Bahnpunkte, {total_seconds:.2f} s")
 
-    total_steps = sections * steps_per_section
-    total_duration = duration * sections
+    app = omni.kit.app.get_app()
+    elapsed = 0.0
 
-    start_time = time.monotonic()
+    def on_physics_step(dt):
+        nonlocal elapsed
+        elapsed += float(dt)
 
-    # Messwerte fuer die spaetere Evaluation
-    measured_joints = []
+    subscription = omni.physx.get_physx_interface().subscribe_physics_step_events(on_physics_step)
+    try:
+        while True:
+            if not timeline.is_playing():
+                raise RuntimeError("Simulation wurde angehalten.")
+            fraction = min(elapsed / total_seconds, 1.0)
+            blend = fraction * fraction * (3.0 - 2.0 * fraction)   # smooth start/stop
+            position = blend * sections
+            k = min(int(position), sections - 1)
+            alpha = position - k
+            target_joints = (1.0 - alpha) * waypoints[k] + alpha * waypoints[k + 1]
+            robot.apply_action(ArticulationAction(
+                joint_positions=target_joints, joint_velocities=zero_velocity, joint_indices=indices))
+            if fraction >= 1.0:
+                break
+            await app.next_update_async()
+    except BaseException:
+        if timeline.is_playing():
+            try:
+                hold = np.asarray(robot.get_joint_positions(), dtype=float).reshape(-1)[indices]
+                if np.all(np.isfinite(hold)):
+                    robot.apply_action(ArticulationAction(
+                        joint_positions=hold.copy(), joint_velocities=zero_velocity, joint_indices=indices))
+            except Exception:
+                pass
+        print("Bewegung abgebrochen; keine weiteren Bahnziele.")
+        raise
+    finally:
+        subscription = None
 
     try:
-        for step in range(1, total_steps + 1):
-
-            if not timeline.is_playing():
-                raise RuntimeError(
-                    "Simulation wurde angehalten."
-                )
-
-            progress = step / steps_per_section
-            segment = min(
-                int(np.ceil(progress)) - 1,
-                sections - 1
-            )
-
-            alpha = progress - segment
-
-            q0 = waypoints[segment]
-            q1 = waypoints[segment + 1]
-
-            target_joints = (
-                (1.0 - alpha) * q0 + alpha * q1
-            )
-
-            robot.apply_action(
-                ArticulationAction(
-                    joint_positions=target_joints,
-                    joint_indices=indices
-                )
-            )
-
-            actual_joints = np.asarray(
-                robot.get_joint_positions()
-            ).reshape(-1)[indices]
-
-            measured_joints.append(
-                actual_joints.copy()
-            )
-
-            next_time = (
-                start_time
-                + step / total_steps * total_duration
-            )
-
-            await asyncio.sleep(
-                max(
-                    0.0,
-                    next_time - time.monotonic()
-                )
-            )
-
         # Letztes Ziel noch einmal halten
-        final_target = waypoints[sections]
+        final_target = waypoints[-1]
 
         robot.apply_action(
             ArticulationAction(
                 joint_positions=final_target.copy(),
+                joint_velocities=zero_velocity,
                 joint_indices=indices
             )
         )
 
         # Continue checking timeline while the final setpoint settles.
-        for _ in range(10):
+        for _ in range(6):
             await asyncio.sleep(0.05)
             if not timeline.is_playing():
                 raise RuntimeError("Simulation wurde angehalten.")
@@ -205,6 +149,11 @@ async def execute_linear_plan(
             )
         carb.log_info("[Scratch Blocks][LINEAR DIAG] END")
 
+        print("=== LINEAR DIAG (deg): target | end | error ===")
+        for column, dof_index in enumerate(indices):
+            t = np.degrees(final_target[column]); e = np.degrees(final_joints[column])
+            print(f"  {names[int(dof_index)]}: {t:9.3f} | {e:9.3f} | {e - t:+7.3f}")
+
         print("=== AUSFUEHRUNG BEENDET ===")
         print(
             "Maximale Gelenkabweichung am Ziel:",
@@ -215,9 +164,6 @@ async def execute_linear_plan(
         return {
             "final_joints": final_joints,
             "final_joint_error_rad": final_error,
-            "measured_joints": np.asarray(
-                measured_joints
-            ),
         }
 
     except (asyncio.CancelledError, Exception):

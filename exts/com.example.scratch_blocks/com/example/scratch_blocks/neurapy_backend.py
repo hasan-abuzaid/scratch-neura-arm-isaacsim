@@ -107,6 +107,32 @@ class NeuraPyBackend:
             raise RuntimeError("NeuraPy did not report successful WAVE motion.")
         return len(targets)
 
+    def move_joint_path(self, points_rad: list[list[float]]) -> int:
+        """Several joint poses (radians, controller order) as ONE move_joint call
+        with enable_blending=True: the arm moves through them without stopping.
+        The controller checks feasibility first; nothing moves if it says no."""
+        if not points_rad:
+            raise ValueError("Empty joint path.")
+        dof = self._require_joint_count()
+        for point in points_rad:
+            if len(point) != dof or not all(isfinite(v) for v in point):
+                raise ValueError("Invalid joint path point.")
+        current = self.read_joint_angles()
+        command = {"target_joint": [list(p) for p in points_rad], "enable_blending": True,
+                   "current_joint_angles": current}
+        if self._speed is not None:
+            command["speed"] = self._speed
+            command["acceleration"] = (self._acceleration
+                                       if self._acceleration is not None else self._speed)
+        check = getattr(self._robot, "check_joint_feasibility", None)
+        if check is not None:
+            result = check(**command)
+            if isinstance(result, (list, tuple)) and result and result[0] is False:
+                raise RuntimeError("Controller says this path is not feasible - nothing was moved.")
+        if self._robot.move_joint(**command) is not True:
+            raise RuntimeError("NeuraPy did not report a successful path motion.")
+        return len(points_rad)
+
     def select_gripper(self, real_config: dict) -> str:
         """INIT GRIPPER on the real arm: activate the tool for this connection.
 

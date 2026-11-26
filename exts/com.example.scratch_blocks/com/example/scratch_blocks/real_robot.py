@@ -24,6 +24,7 @@ REAL_BLOCK_TYPES = {
     "print", "repeat", "end_repeat", "stop_program",
     "initialize_gripper", "gripper",   # 2FG7 via set_tool + release()/grasp(), lab-tested 20 Nov 2026
     "wave",   # one blended move_joint call (enable_blending) - added 23 Nov 2026, NOT yet lab-tested
+    "move_linear", "move_relative",   # validated sim joint path as one blended move_joint - 26 Nov 2026, NOT yet lab-tested
 }
 
 # NEURA LARA 8 datasheet (V7, 01.11.2026): max joint speed in deg/s, by joint number.

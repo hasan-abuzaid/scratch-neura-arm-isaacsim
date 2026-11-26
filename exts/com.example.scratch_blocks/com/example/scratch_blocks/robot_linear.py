@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -9,6 +8,9 @@ from isaacsim.robot_motion.motion_generation import (
     LulaKinematicsSolver,
     ArticulationKinematicsSolver,
 )
+
+
+POINT_SPACING_M = 0.005   # IK point every 5 mm along the straight line
 
 
 def plan_linear(
@@ -145,6 +147,12 @@ def plan_linear(
     if limits.ndim == 3:
         limits = limits[0]
 
+    # Dense path: one IK point every POINT_SPACING_M along the line (at least
+    # the requested number of sections), so the tip is on the line everywhere,
+    # not only at a few waypoints.
+    requested_steps = steps
+    steps = max(requested_steps, int(np.ceil(float(np.linalg.norm(offset)) / POINT_SPACING_M)))
+
     # Wegpunkte planen
     waypoints = [start_joints.copy()]
     previous = start_joints.copy()
@@ -154,7 +162,6 @@ def plan_linear(
 
     print("=== MOVE LINEAR PLANUNG ===")
     print("Startposition:", start_position)
-    print("Distanz:", distance, "m")
     print("World displacement XYZ:", offset)
 
     for i in range(1, steps + 1):
@@ -252,17 +259,19 @@ def plan_linear(
         waypoints.append(solution.copy())
         previous = solution.copy()
 
-        print(
+        if i == steps or i % max(1, steps // 5) == 0:
+          print(
             f"Punkt {i}/{steps}: "
             f"Fehler={position_error * 1000:.3f} mm, "
             f"Orientierung={orientation_error:.3f} Grad"
-        )
+          )
 
     print("=== PLANUNG ERFOLGREICH ===")
     print("Roboter wurde NICHT bewegt.")
 
     return {
         "joint_names": active_names,
+        "requested_sections": requested_steps,
         "joint_indices": indices,
         "waypoints": np.asarray(waypoints),
         "start_position": start_position,

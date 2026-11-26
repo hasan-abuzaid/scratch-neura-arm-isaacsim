@@ -13,7 +13,33 @@ def initialize_configured_robot(parameters):
     profile = load_profile(value["profile"])
     robot = initialize_robot(value["robot_path"])
     validate_profile_robot(profile, robot)
+    apply_drive_gains(robot, profile)
     return robot, profile
+
+
+def apply_drive_gains(robot, profile):
+    """Set joint drive stiffness/damping from the profile on every INIT ROBOT.
+
+    Profile values are per degree, like the USD drive attributes. The physics
+    API (get/set_gains) works per radian, hence the factor 180/pi. Written to
+    the running physics AND the USD drives, so it survives Stop/Play.
+    """
+    import math
+    import numpy as np
+    gains = {k: v for k, v in (profile.get("drive_gains") or {}).items() if not k.startswith("_")}
+    if not gains:
+        return
+    names = list(robot.dof_names)
+    view = robot._articulation_view
+    kps, kds = (np.asarray(x, dtype=float).copy() for x in view.get_gains())
+    per_rad = 180.0 / math.pi
+    for name, (stiffness, damping) in gains.items():
+        if name in names:
+            i = names.index(name)
+            kps[..., i] = float(stiffness) * per_rad
+            kds[..., i] = float(damping) * per_rad
+    view.set_gains(kps=kps, kds=kds, save_to_usd=True)
+    print(f"[Robot] Drive gains from profile {profile['name']} applied to {len(gains)} joints")
 
 
 def attach_configured_gripper(robot, profile, robot_path, parameters):
@@ -83,12 +109,53 @@ async def wait(seconds):
     await delay(seconds)
 
 
+# MOVE LINEAR / RELATIVE in simulation: peak tip speed and shortest move time.
+LINEAR_PEAK_SPEED_M_S = 0.15
+LINEAR_MIN_SECONDS = 0.5
+
+
+async def wait_until_still(robot, profile, max_step_deg=0.05, hold_seconds=0.15, timeout_seconds=3.0):
+    """Wait until no arm joint moves more than max_step_deg over hold_seconds.
+
+    Judged by joint POSITIONS: the reported velocities can be stale right after
+    Play/INIT (same nonzero value repeated while the angles do not change).
+    A joint move counts as 'reached' within 0.5 deg while the arm may still be
+    swinging; MOVE LINEAR must plan and start from a pose that is standing still.
+    """
+    import asyncio
+    import time
+    import numpy as np
+    import omni.timeline
+    names = list(robot.dof_names)
+    indices = [names.index(n) for n in profile.get("arm_joint_names", []) if n in names]
+    timeline = omni.timeline.get_timeline_interface()
+    def read():
+        return np.degrees(np.asarray(robot.get_joint_positions(), dtype=float).reshape(-1)[indices])
+
+    started = time.monotonic()
+    reference, reference_time = read(), started
+    while True:
+        await asyncio.sleep(0.03)
+        if not timeline.is_playing():
+            raise RuntimeError("Simulation wurde angehalten.")
+        current, now = read(), time.monotonic()
+        moved = float(np.max(np.abs(current - reference)))
+        if moved > max_step_deg:
+            reference, reference_time = current, now      # still moving: restart the window
+        elif now - reference_time >= hold_seconds:
+            return
+        if now - started > timeout_seconds:
+            raise TimeoutError(f"MOVE LINEAR: arm still moving after {timeout_seconds:g} s "
+                               f"(last {moved:.3f} deg within the check window)")
+
+
 async def move_linear(robot, profile, parameters, on_status=lambda value: None):
     import math
     import carb
     import numpy as np
     from .robot_linear_adapter import plan_from_block
     from .robot_linear_execution import execute_linear_plan
+    await wait_until_still(robot, profile)   # plan from a pose that is not drifting
     plan = plan_from_block(robot, parameters, profile=profile)
     sections = len(plan["waypoints"]) - 1
     carb.log_info(
@@ -97,8 +164,10 @@ async def move_linear(robot, profile, parameters, on_status=lambda value: None):
     )
     carb.log_info(f"[Scratch Blocks] MOVE LINEAR world XYZ=({parameters['x']}, {parameters['y']}, {parameters['z']}); start={plan['start_position']}; target={plan['target_position']}")
     on_status(f"MOVE LINEAR: executing {sections} sections")
-    result = await execute_linear_plan(robot, plan, duration=float(parameters["duration"]),
-                                       sections=sections, steps_per_section=40)
+    distance_m = float(np.linalg.norm(np.asarray(plan["target_position"]) - np.asarray(plan["start_position"])))
+    # Smoothstep peaks at 1.5x the average speed, so this keeps the peak tip speed <= LINEAR_PEAK_SPEED_M_S.
+    total_seconds = max(LINEAR_MIN_SECONDS, 1.5 * distance_m / LINEAR_PEAK_SPEED_M_S)
+    result = await execute_linear_plan(robot, plan, total_seconds=total_seconds)
     position, _ = plan["solver"].compute_forward_kinematics(plan["frame"], result["final_joints"])
     position = np.asarray(position, dtype=float).reshape(3)
     error = float(np.linalg.norm(position - plan["target_position"]))

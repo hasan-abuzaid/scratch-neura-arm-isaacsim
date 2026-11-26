@@ -1,0 +1,200 @@
+"""URDF -> Lula robot description YAML, for any serial arm.
+
+Pure Python (no Isaac Sim imports), so it can be tested outside the simulator:
+    python urdf_kinematics.py path/to/robot.urdf
+
+What it does:
+1. Parse links and joints from the URDF.
+2. Find the root link (the link no joint points to).
+3. Walk down the chain. Moving joints (revolute/continuous/prismatic) are arm
+   joints; fixed joints are followed. The walk stops where the tree branches
+   into several moving joints (gripper fingers) or ends.
+4. Pick the end-effector frame: a link named "*flange*" after the last arm
+   joint if there is one, otherwise the last arm link.
+5. Write a minimal Lula YAML (enough for IK/FK; no collision spheres).
+
+It also contains a small numpy forward kinematics (FK) used to sanity-check
+the URDF independently of Lula.
+"""
+from __future__ import annotations
+
+import math
+import os
+import xml.etree.ElementTree as ET
+
+import numpy as np
+
+MOVING = ("revolute", "continuous", "prismatic")
+
+
+# --------------------------------------------------------------------------- parsing
+def _vec(text, default=(0.0, 0.0, 0.0)):
+    return [float(v) for v in text.split()] if text else list(default)
+
+
+def parse_urdf(urdf_path: str) -> dict:
+    root = ET.parse(urdf_path).getroot()
+    links = [link.get("name") for link in root.findall("link")]
+    joints = []
+    for j in root.findall("joint"):
+        origin = j.find("origin")
+        axis = j.find("axis")
+        limit = j.find("limit")
+        joints.append({
+            "name": j.get("name"),
+            "type": j.get("type"),
+            "parent": j.find("parent").get("link"),
+            "child": j.find("child").get("link"),
+            "xyz": _vec(origin.get("xyz") if origin is not None else None),
+            "rpy": _vec(origin.get("rpy") if origin is not None else None),
+            "axis": _vec(axis.get("xyz") if axis is not None else None, (1.0, 0.0, 0.0)),
+            "lower": float(limit.get("lower", "nan")) if limit is not None else float("nan"),
+            "upper": float(limit.get("upper", "nan")) if limit is not None else float("nan"),
+            "velocity": float(limit.get("velocity", "nan")) if limit is not None else float("nan"),
+        })
+    return {"name": root.get("name", ""), "links": links, "joints": joints}
+
+
+def find_arm_chain(model: dict, arm_prefix: str | None = None) -> dict:
+    joints = model["joints"]
+    children = {}
+    for j in joints:
+        children.setdefault(j["parent"], []).append(j)
+    child_links = {j["child"] for j in joints}
+    roots = [name for name in model["links"] if name not in child_links]
+    if len(roots) != 1:
+        raise ValueError(f"URDF must have exactly one root link, found {roots}")
+    base = roots[0]
+
+    chain, arm, link = [], [], base       # chain = every joint walked, incl. fixed
+    while link in children:
+        outgoing = children[link]
+        moving = [j for j in outgoing if j["type"] in MOVING]
+        if len(moving) > 1:
+            break                                     # branch: fingers start here
+        joint = moving[0] if moving else (outgoing[0] if len(outgoing) == 1 else None)
+        if joint is None:
+            break                                     # several fixed branches: stop
+        if joint["type"] in MOVING:
+            if arm_prefix and not joint["name"].startswith(arm_prefix):
+                break                                 # e.g. a gripper joint
+            if joint["type"] == "prismatic" and arm:
+                break                                 # prismatic after the arm = gripper
+            arm.append(joint)
+        chain.append(joint)
+        link = joint["child"]
+    if not arm:
+        raise ValueError("No moving joints found in the URDF chain")
+
+    # End-effector: a fixed "*flange*"/"*tool*"/"*tcp*" link after the last arm joint, else last arm link.
+    last_arm_link = arm[-1]["child"]
+    ee = last_arm_link
+    after = chain[chain.index(arm[-1]) + 1:]
+    for j in after:
+        if any(key in j["child"].lower() for key in ("flange", "tcp", "tool")):
+            ee = j["child"]
+    if ee == last_arm_link:                   # flange may hang off the last link without being on the walked chain
+        for j in children.get(last_arm_link, []):
+            if j["type"] == "fixed" and "flange" in j["child"].lower():
+                ee = j["child"]
+    return {"root_link": base, "arm_joints": arm, "ee_frame": ee}
+
+
+# --------------------------------------------------------------------------- YAML
+def write_lula_yaml(chain: dict, yaml_path: str) -> str:
+    arm = chain["arm_joints"]
+    n = len(arm)
+    default_q = []
+    for j in arm:
+        lo, hi = j["lower"], j["upper"]
+        default_q.append(0.0 if not (math.isfinite(lo) and math.isfinite(hi)) else min(max(0.0, lo), hi))
+
+    def flist(values):
+        return "[" + ", ".join(f"{v:g}" for v in values) + "]"
+
+    lines = [
+        "# Auto-generated by urdf_kinematics.py - do not edit by hand.",
+        "api_version: 1.0",
+        "cspace:",
+        *[f"    - {j['name']}" for j in arm],
+        f"root_link: {chain['root_link']}",
+        f"default_q: {flist(default_q)}",
+        f"acceleration_limits: {flist([10.0] * n)}",
+        f"jerk_limits: {flist([10000.0] * n)}",
+        "cspace_to_urdf_rules: []",
+        "composite_task_spaces: []",
+        "collision_spheres: []",
+        "",
+    ]
+    os.makedirs(os.path.dirname(os.path.abspath(yaml_path)), exist_ok=True)
+    with open(yaml_path, "w", encoding="utf-8") as stream:
+        stream.write("\n".join(lines))
+    return yaml_path
+
+
+def generate(urdf_path: str, yaml_path: str | None = None, arm_prefix: str | None = None) -> dict:
+    """Main entry: URDF in -> YAML written -> summary dict (for the robot profile)."""
+    model = parse_urdf(urdf_path)
+    chain = find_arm_chain(model, arm_prefix)
+    if yaml_path is None:
+        yaml_path = os.path.splitext(urdf_path)[0] + "_auto_lula.yaml"
+    write_lula_yaml(chain, yaml_path)
+    return {
+        "provider": "files",
+        "urdf_path": os.path.abspath(urdf_path),
+        "robot_description_path": os.path.abspath(yaml_path),
+        "end_effector_frame": chain["ee_frame"],
+        "root_link": chain["root_link"],
+        "arm_joint_names": [j["name"] for j in chain["arm_joints"]],
+        "urdf_limits_rad": [(j["lower"], j["upper"]) for j in chain["arm_joints"]],
+        "urdf_velocity_rad_s": [j["velocity"] for j in chain["arm_joints"]],
+    }
+
+
+# --------------------------------------------------------------------------- independent FK
+def _rpy_matrix(r, p, y):
+    cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+    return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                     [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                     [-sp, cp * sr, cp * cr]])
+
+
+def _axis_angle(axis, angle):
+    a = np.asarray(axis, float)
+    a = a / np.linalg.norm(a)
+    k = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+    return np.eye(3) + math.sin(angle) * k + (1 - math.cos(angle)) * (k @ k)
+
+
+def forward_kinematics(urdf_path: str, joint_values: dict, frame: str) -> np.ndarray:
+    """4x4 pose of `frame` in the URDF root frame. joint_values: name -> rad (or m)."""
+    model = parse_urdf(urdf_path)
+    by_child = {j["child"]: j for j in model["joints"]}
+    path, link = [], frame
+    while link in by_child:
+        path.append(by_child[link])
+        link = by_child[link]["parent"]
+    T = np.eye(4)
+    for j in reversed(path):
+        step = np.eye(4)
+        step[:3, :3] = _rpy_matrix(*j["rpy"])
+        step[:3, 3] = j["xyz"]
+        T = T @ step
+        q = float(joint_values.get(j["name"], 0.0))
+        motion = np.eye(4)
+        if j["type"] in ("revolute", "continuous"):
+            motion[:3, :3] = _axis_angle(j["axis"], q)
+        elif j["type"] == "prismatic":
+            motion[:3, 3] = np.asarray(j["axis"], float) * q
+        T = T @ motion
+    return T
+
+
+if __name__ == "__main__":
+    import json
+    import sys
+    urdf = sys.argv[1]
+    info = generate(urdf)
+    print(json.dumps(info, indent=2))
+    tip = forward_kinematics(urdf, {}, info["end_effector_frame"])[:3, 3]
+    print("Tip at all-zero joints (m, URDF root frame):", np.round(tip, 4))

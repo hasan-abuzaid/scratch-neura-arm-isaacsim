@@ -3,13 +3,41 @@
   "profiles": {
     "franka": {
       "label": "Franka Panda - simulation test profile",
-      "arm_joint_names": ["panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"],
-      "joint_aliases": {"joint1": "panda_joint1", "joint2": "panda_joint2", "joint3": "panda_joint3", "joint4": "panda_joint4", "joint5": "panda_joint5", "joint6": "panda_joint6", "joint7": "panda_joint7"},
-      "kinematics": {"provider": "franka_builtin", "end_effector_frame": "panda_hand"},
+      "arm_joint_names": [
+        "panda_joint1",
+        "panda_joint2",
+        "panda_joint3",
+        "panda_joint4",
+        "panda_joint5",
+        "panda_joint6",
+        "panda_joint7"
+      ],
+      "joint_aliases": {
+        "joint1": "panda_joint1",
+        "joint2": "panda_joint2",
+        "joint3": "panda_joint3",
+        "joint4": "panda_joint4",
+        "joint5": "panda_joint5",
+        "joint6": "panda_joint6",
+        "joint7": "panda_joint7"
+      },
+      "kinematics": {
+        "provider": "franka_builtin",
+        "end_effector_frame": "panda_hand"
+      },
       "gripper": {
-        "joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
-        "open_positions": [0.035, 0.035],
-        "closed_positions": [0.0, 0.0],
+        "joint_names": [
+          "panda_finger_joint1",
+          "panda_finger_joint2"
+        ],
+        "open_positions": [
+          0.035,
+          0.035
+        ],
+        "closed_positions": [
+          0.0,
+          0.0
+        ],
         "position_unit": "m",
         "tolerance": 0.001,
         "duration_seconds": 1.0,
@@ -18,25 +46,126 @@
     },
     "lara8": {
       "label": "NEURA LARA 8 (mount any gripper with INIT GRIPPER)",
-      "arm_joint_names": ["lara8_joint1", "lara8_joint2", "lara8_joint3", "lara8_joint4", "lara8_joint5", "lara8_joint6"],
-      "joint_aliases": {"joint1": "lara8_joint1", "joint2": "lara8_joint2", "joint3": "lara8_joint3", "joint4": "lara8_joint4", "joint5": "lara8_joint5", "joint6": "lara8_joint6"},
-      "tool_flange": {"link": "lara8_link6", "frame": "lara8_flange"},
-      "kinematics": null,
-      "gripper": null
+      "arm_joint_names": [
+        "lara8_joint1",
+        "lara8_joint2",
+        "lara8_joint3",
+        "lara8_joint4",
+        "lara8_joint5",
+        "lara8_joint6"
+      ],
+      "joint_aliases": {
+        "joint1": "lara8_joint1",
+        "joint2": "lara8_joint2",
+        "joint3": "lara8_joint3",
+        "joint4": "lara8_joint4",
+        "joint5": "lara8_joint5",
+        "joint6": "lara8_joint6"
+      },
+      "tool_flange": {
+        "link": "lara8_link6",
+        "frame": "lara8_flange"
+      },
+      "kinematics": {
+        "provider": "files",
+        "robot_description_path": "kinematics/lara8/lara8_auto_lula.yaml",
+        "urdf_path": "kinematics/lara8/lara8.urdf",
+        "end_effector_frame": "lara8_flange"
+      },
+      "gripper": null,
+      "drive_gains": {
+        "_unit": "stiffness, damping per degree (as in the USD drive)",
+        "lara8_joint1": [
+          100000.0,
+          10000.0
+        ],
+        "lara8_joint2": [
+          100000.0,
+          10000.0
+        ],
+        "lara8_joint3": [
+          100000.0,
+          10000.0
+        ],
+        "lara8_joint4": [
+          100000.0,
+          10000.0
+        ],
+        "lara8_joint5": [
+          30000.0,
+          3000.0
+        ],
+        "lara8_joint6": [
+          30000.0,
+          3000.0
+        ]
+      }
     },
     "lara8_2fg7": {
       "label": "NEURA LARA 8 + OnRobot 2FG7 on the flange (one articulation)",
-      "arm_joint_names": ["lara8_joint1", "lara8_joint2", "lara8_joint3", "lara8_joint4", "lara8_joint5", "lara8_joint6"],
-      "joint_aliases": {"joint1": "lara8_joint1", "joint2": "lara8_joint2", "joint3": "lara8_joint3", "joint4": "lara8_joint4", "joint5": "lara8_joint5", "joint6": "lara8_joint6"},
-      "kinematics": null,
+      "arm_joint_names": [
+        "lara8_joint1",
+        "lara8_joint2",
+        "lara8_joint3",
+        "lara8_joint4",
+        "lara8_joint5",
+        "lara8_joint6"
+      ],
+      "joint_aliases": {
+        "joint1": "lara8_joint1",
+        "joint2": "lara8_joint2",
+        "joint3": "lara8_joint3",
+        "joint4": "lara8_joint4",
+        "joint5": "lara8_joint5",
+        "joint6": "lara8_joint6"
+      },
+      "kinematics": {
+        "provider": "files",
+        "robot_description_path": "kinematics/lara8/lara8_auto_lula.yaml",
+        "urdf_path": "kinematics/lara8/lara8.urdf",
+        "end_effector_frame": "lara8_flange"
+      },
       "gripper": {
-        "joint_names": ["finger_stroke"],
-        "open_positions": [0.019],
-        "closed_positions": [0.0],
+        "joint_names": [
+          "finger_stroke"
+        ],
+        "open_positions": [
+          0.019
+        ],
+        "closed_positions": [
+          0.0
+        ],
         "position_unit": "m",
         "tolerance": 0.001,
         "duration_seconds": 1.0,
         "timeout_seconds": 5.0
+      },
+      "drive_gains": {
+        "_unit": "stiffness, damping per degree (as in the USD drive)",
+        "lara8_joint1": [
+          100000.0,
+          10000.0
+        ],
+        "lara8_joint2": [
+          100000.0,
+          10000.0
+        ],
+        "lara8_joint3": [
+          100000.0,
+          10000.0
+        ],
+        "lara8_joint4": [
+          100000.0,
+          10000.0
+        ],
+        "lara8_joint5": [
+          30000.0,
+          3000.0
+        ],
+        "lara8_joint6": [
+          30000.0,
+          3000.0
+        ]
       }
     },
     "generic": {
@@ -50,9 +179,15 @@
   "grippers": {
     "onrobot_2fg7": {
       "label": "OnRobot 2FG7 parallel gripper",
-      "joint_names": ["finger_stroke"],
-      "open_positions": [0.019],
-      "closed_positions": [0.0],
+      "joint_names": [
+        "finger_stroke"
+      ],
+      "open_positions": [
+        0.019
+      ],
+      "closed_positions": [
+        0.0
+      ],
       "position_unit": "m",
       "tolerance": 0.001,
       "duration_seconds": 1.0,

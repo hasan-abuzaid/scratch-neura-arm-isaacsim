@@ -3,6 +3,40 @@ from __future__ import annotations
 from .model import validate_linear_parameters
 
 
+def read_root_link(yaml_path: str) -> str:
+    """The 'root_link:' entry of a Lula robot description YAML."""
+    with open(yaml_path, encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip().startswith("root_link:"):
+                return line.split(":", 1)[1].strip()
+    raise ValueError(f"No root_link in {yaml_path}")
+
+
+def kinematic_root_world_pose(stage, robot, yaml_path: str):
+    """World pose of the scene prim that matches the URDF/Lula root link.
+
+    Lula's model starts at root_link. robot.get_world_pose() returns the
+    articulation root, which can sit further down the chain and already carry
+    the URDF's root rotation (LARA 8: -90 deg about Y, applied twice -> arm on
+    its side). Reading the matching prim avoids that for any robot.
+    """
+    import numpy as np
+    from pxr import Usd, UsdGeom
+    root_name = read_root_link(yaml_path)
+    robot_root = str(robot.prim_path)
+    top = robot_root.split("/")[:3]          # e.g. /World/lara8
+    search_root = stage.GetPrimAtPath("/".join(top)) if len(top) == 3 else stage.GetPseudoRoot()
+    matches = [p for p in Usd.PrimRange(search_root) if p.GetName() == root_name]
+    if len(matches) != 1:
+        raise RuntimeError(f"Expected one prim named '{root_name}' under {search_root.GetPath()}, "
+                           f"found {[str(p.GetPath()) for p in matches]}")
+    matrix = UsdGeom.Xformable(matches[0]).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    position = np.array(matrix.ExtractTranslation(), dtype=float)
+    q = matrix.ExtractRotationQuat()
+    orientation = np.array([q.GetReal(), *q.GetImaginary()], dtype=float)  # w, x, y, z
+    return position, orientation
+
+
 def plan_from_block(robot, parameters: dict, profile: dict | None = None):
     """Resolve robot configuration and plan; never command a movement.
 
@@ -34,7 +68,7 @@ def plan_from_block(robot, parameters: dict, profile: dict | None = None):
     if not math.isclose(float(UsdGeom.GetStageMetersPerUnit(stage)), 1.0, abs_tol=1e-9):
         raise ValueError("Linear planning prototype requires stage units of 1 metre.")
 
-    base_pose = robot.get_world_pose()
+    base_pose = kinematic_root_world_pose(stage, robot, descriptor)
     is_absolute = value.get("coordinate_mode") == "absolute"
     return plan_linear(
         robot,

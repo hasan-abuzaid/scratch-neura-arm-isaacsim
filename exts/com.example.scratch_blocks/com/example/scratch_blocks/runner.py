@@ -136,6 +136,11 @@ class ProgramRunner:
         self._robot_path = None
         self._linear_plan = None
         self._profile = None
+        if real:
+            # Joint paths validated by the last simulation run, in program order.
+            self._real_linear_queue = list(getattr(self, "_validated_linear_paths", []))
+        else:
+            self._validated_linear_paths = []
 
         try:
             if offline_joint_target is not None:
@@ -185,9 +190,17 @@ class ProgramRunner:
                         except Exception as error:  # the sim view must never stop the real run
                             carb.log_warn(f"[Scratch Blocks] sim gripper mirror failed: {error}")
                     t0 = time.perf_counter()
-                    completed_detail = await self._in_thread(
-                        self._run_offline_joint_block, block, *offline_joint_target
-                    )
+                    if block.type in ("move_linear", "move_relative"):
+                        # Replay the joint path that was validated in simulation.
+                        if not self._real_linear_queue:
+                            raise RuntimeError("No validated MOVE LINEAR path: Run in simulation first.")
+                        path = self._real_linear_queue.pop(0)
+                        completed_detail = await self._in_thread(
+                            self._run_real_linear_path, path, *offline_joint_target)
+                    else:
+                        completed_detail = await self._in_thread(
+                            self._run_offline_joint_block, block, *offline_joint_target
+                        )
                     t1 = time.perf_counter()
                     gap = (t0 - last_end) if last_end is not None else 0.0
                     print(f"[timing] {block.type}: call {t1 - t0:.2f} s | gap before it {gap:.2f} s")
@@ -305,6 +318,10 @@ class ProgramRunner:
                     action = control.move_relative if is_relative else control.move_linear
                     result = await action(self._robot, self._profile, parameters, self._on_status)
                     self._linear_plan = result["plan"]
+                    self._validated_linear_paths.append({
+                        "joint_names": list(result["plan"]["joint_names"]),
+                        "waypoints": [list(map(float, q)) for q in result["plan"]["waypoints"]],
+                    })
                     completed_detail = f"{'RELATIVE' if is_relative else 'LINEAR'} EXECUTED | estimated error {result['estimated_error_mm']:.3f} mm"
                     self._on_status(completed_detail)
 
@@ -425,6 +442,24 @@ class ProgramRunner:
             except Exception:
                 pass
             raise
+
+    @staticmethod
+    def _run_real_linear_path(path: dict, backend: NeuraPyBackend, axis_names: tuple[str, ...]) -> str:
+        """MOVE LINEAR on the real arm: the IK joint path from the simulation
+        (one point every 5 mm, already checked there) as ONE blended move_joint."""
+        names = path["joint_names"]
+        missing = [n for n in names if n not in axis_names]
+        if missing:
+            raise ValueError(f"Linear path joints not on the controller: {missing}")
+        current = backend.read_joint_angles()
+        points = []
+        for q in path["waypoints"][1:]:              # [0] is the start pose the arm is at
+            full = list(current)
+            for name, value in zip(names, q):
+                full[axis_names.index(name)] = float(value)
+            points.append(full)
+        count = backend.move_joint_path(points)
+        return f"NeuraPy | MOVE LINEAR ({count} blended points from the validated path)"
 
     @staticmethod
     def _run_offline_joint_block(
