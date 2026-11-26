@@ -15,15 +15,29 @@ from pathlib import Path
 from typing import Any, Iterable
 
 REAL_ROBOT_IP = "192.168.2.13"
-REAL_SPEED_PERCENT = 10.0       # NeuraPy move_joint speed, % of max (manual p. 118)
+REAL_SPEED_PERCENT = 50.0       # NeuraPy move_joint speed, % of max (manual p. 118)
 REAL_ACCEL_PERCENT = 10.0       # NeuraPy move_joint acceleration, % of max
-REAL_OVERRIDE = 0.2             # set_override: everything at 20 % (manual p. 212)
+REAL_OVERRIDE = 1.0             # set_override 0..1, multiplies the speed; 1.0 = no reduction (manual p. 212)
 START_POSE_TOLERANCE_DEG = 0.5  # real arm must still be at the validated start pose
 REAL_BLOCK_TYPES = {
     "initialize_robot", "move_joint", "move_all_joints", "wait", "set_speed",
     "print", "repeat", "end_repeat", "stop_program",
     "initialize_gripper", "gripper",   # 2FG7 via set_tool + release()/grasp(), lab-tested 20 Nov 2026
+    "wave",   # one blended move_joint call (enable_blending) - added 23 Nov 2026, NOT yet lab-tested
 }
+
+# NEURA LARA 8 datasheet (V7, 01.11.2026): max joint speed in deg/s, by joint number.
+# The datasheet gives no acceleration limits.
+LARA8_MAX_JOINT_SPEED_DEG_S = {1: 130.0, 2: 130.0, 3: 150.0, 4: 150.0, 5: 180.0, 6: 180.0}
+
+
+def max_joint_speed_deg_s(joint_name: str, default: float = 180.0) -> float:
+    """Datasheet max speed for 'lara8_jointN'; `default` for joints without a number."""
+    import re
+    match = re.search(r"(\d+)\s*$", str(joint_name))
+    if match is None:
+        return default
+    return LARA8_MAX_JOINT_SPEED_DEG_S.get(int(match.group(1)), default)
 
 
 def prepare_neurapy_import() -> None:

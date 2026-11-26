@@ -68,6 +68,45 @@ class NeuraPyBackend:
         targets[axis_index] = radians(target_degrees)
         self._move_joint_vector(targets, current if self._speed is not None else None)
 
+    def wave_single_joint(self, axis_index: int, low_degrees: float, high_degrees: float,
+                          cycles: float) -> int:
+        """WAVE on the real arm: ONE move_joint call through high, low, high, ...
+        with enable_blending=True, so the arm does not stop at every point
+        (manual: move_joint / check_joint_feasibility). Other joints stay put.
+        Speed/acceleration are the fixed real settings; WAVE frequency is ignored.
+        Returns the number of points sent.
+        """
+        dof = self._require_joint_count()
+        if type(axis_index) is not int or not 0 <= axis_index < dof:
+            raise ValueError(f"Joint index must be between 0 and {dof - 1}.")
+        if not (isfinite(low_degrees) and isfinite(high_degrees)) or high_degrees <= low_degrees:
+            raise ValueError("WAVE: high must be larger than low.")
+        half_swings = int(round(2 * float(cycles)))
+        if half_swings < 1:
+            raise ValueError("WAVE: at least half a cycle is required.")
+        current = self.read_joint_angles()
+        if len(current) != dof:
+            raise ValueError("NeuraPy returned the wrong number of joint angles.")
+        targets = []
+        for k in range(half_swings + 1):   # high, low, high, ... (same order as the simulation)
+            point = list(current)
+            point[axis_index] = radians(high_degrees if k % 2 == 0 else low_degrees)
+            targets.append(point)
+        command = {"target_joint": targets, "enable_blending": True,
+                   "current_joint_angles": current}
+        if self._speed is not None:
+            command["speed"] = self._speed
+            command["acceleration"] = (self._acceleration
+                                       if self._acceleration is not None else self._speed)
+        check = getattr(self._robot, "check_joint_feasibility", None)
+        if check is not None:
+            result = check(**command)
+            if isinstance(result, (list, tuple)) and result and result[0] is False:
+                raise RuntimeError("Controller says this WAVE is not feasible - nothing was moved.")
+        if self._robot.move_joint(**command) is not True:
+            raise RuntimeError("NeuraPy did not report successful WAVE motion.")
+        return len(targets)
+
     def select_gripper(self, real_config: dict) -> str:
         """INIT GRIPPER on the real arm: activate the tool for this connection.
 

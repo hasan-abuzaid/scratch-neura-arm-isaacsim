@@ -56,6 +56,28 @@ async def move_joint(robot, profile, joint_name, target_degrees, speed_degrees_p
     return actual_name, reached
 
 
+async def wave_joint(robot, profile, joint_name, low, high, frequency, cycles,
+                     approach_speed_degrees_per_second=None):
+    """WAVE block in simulation: continuous wave with quick, smooth turns.
+
+    Peak speed is checked against the LARA 8 datasheet limit of this joint.
+    """
+    from .robot_profiles import resolve_joint
+    from .robot_motion import wave_joint as execute
+    from .real_robot import max_joint_speed_deg_s
+    actual_name = resolve_joint(profile, joint_name)
+    await execute(robot, actual_name, low, high,
+                  frequency_hz=frequency, cycles=cycles,
+                  max_speed_deg_s=max_joint_speed_deg_s(actual_name),
+                  approach_speed_deg_s=approach_speed_degrees_per_second or 60.0,
+                  sharpness=WAVE_SHARPNESS)
+    return actual_name
+
+
+# 0 = pure sine (slow turns), 0.98 = almost constant speed with very quick turns.
+WAVE_SHARPNESS = 0.93
+
+
 async def wait(seconds):
     from .robot_wait import wait as delay
     await delay(seconds)

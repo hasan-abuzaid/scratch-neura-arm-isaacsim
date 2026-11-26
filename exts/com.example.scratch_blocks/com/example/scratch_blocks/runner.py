@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import math
+import time
 
 import carb
 from collections.abc import Callable
@@ -148,6 +149,8 @@ class ProgramRunner:
                     elif item.type == "gripper" and not gripper_ready:
                         raise ValueError("GRIPPER on the real robot needs INIT GRIPPER before it.")
 
+            last_end = None  # [timing] end of the previous real NeuraPy call
+
             for block in blocks:
 
                 self._on_active_block(block.id)
@@ -181,9 +184,14 @@ class ProgramRunner:
                                                   else str(block.value).strip().lower())
                         except Exception as error:  # the sim view must never stop the real run
                             carb.log_warn(f"[Scratch Blocks] sim gripper mirror failed: {error}")
+                    t0 = time.perf_counter()
                     completed_detail = await self._in_thread(
                         self._run_offline_joint_block, block, *offline_joint_target
                     )
+                    t1 = time.perf_counter()
+                    gap = (t0 - last_end) if last_end is not None else 0.0
+                    print(f"[timing] {block.type}: call {t1 - t0:.2f} s | gap before it {gap:.2f} s")
+                    last_end = t1
                     self._on_status(completed_detail)
                     continue
 
@@ -321,6 +329,22 @@ class ProgramRunner:
                     carb.log_info(f"[Scratch Blocks] {completed_detail}; degrees={reached}")
                     self._on_status(completed_detail)
 
+                # WAVE: continuous swing of one joint (preset motion).
+                elif block.type == "wave":
+                    if self._robot is None:
+                        raise RuntimeError("WAVE requires INIT ROBOT before it.")
+                    from .model import validate_wave_parameters
+                    value = validate_wave_parameters(block.value)
+                    self._on_status(f"WAVE {value['joint_name']}: {value['low']:g}..{value['high']:g} deg, "
+                                    f"{value['frequency']:g} Hz, {value['cycles']:g} cycles")
+                    actual_name = await control.wave_joint(
+                        self._robot, self._profile, value["joint_name"], value["low"], value["high"],
+                        value["frequency"], value["cycles"],
+                        approach_speed_degrees_per_second=joint_speed)
+                    completed_detail = f"WAVE {actual_name}: done"
+                    self._on_status(completed_detail)
+                    await asyncio.sleep(0)
+
                 # MOVE JOINT: send target and wait until reached.
                 elif block.type == "move_joint":
                     if self._robot is None:
@@ -431,6 +455,16 @@ class ProgramRunner:
                 raise ValueError("MOVE ALL requires one angle per controller axis.")
             backend.move_all_joints([targets[name] for name in axis_names])
             return "NeuraPy offline | MOVE ALL"
+
+        if block.type == "wave":
+            from .model import validate_wave_parameters
+            value = validate_wave_parameters(block.value)
+            joint_name = value["joint_name"]
+            if joint_name not in axis_names:
+                raise ValueError(f"Unknown controller axis: {joint_name}")
+            points = backend.wave_single_joint(
+                axis_names.index(joint_name), value["low"], value["high"], value["cycles"])
+            return f"NeuraPy | WAVE {joint_name} ({points} blended points)"
 
         if block.type == "initialize_gripper":
             from .robot_profiles import load_gripper_profile

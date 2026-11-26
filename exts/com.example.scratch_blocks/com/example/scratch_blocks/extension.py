@@ -27,6 +27,7 @@ from .model import (
     parse_joint_targets,
     validate_linear_parameters,
     validate_initialize_parameters,
+    validate_wave_parameters,
 )
 from .runner import ProgramRunner
 
@@ -93,6 +94,12 @@ WRAPPER_MARGIN_PX = 14.0
 # this is RGB 197,139,50 sampled from repeat_block.svg) and arm width.
 REPEAT_COLOR = 0xFF328BC5
 END_ARM_WIDTH = 200.0
+# WAVE block: joint menu + four number fields need a wider block than BLOCK_WIDTH.
+WAVE_WIDTH = 520.0
+WAVE_FIELDS = (("low", "low", "Lower end of the swing (degrees)"),
+               ("high", "high", "Upper end of the swing (degrees); the wave starts here"),
+               ("frequency", "Hz", "Full swings per second (simulation; the real arm uses its fixed speed)"),
+               ("cycles", "x", "Number of full swings: 0.5, 1, 1.5 ... (whole = ends at high)"))
 # Box selection: outline colour of selected blocks and the selection box
 # (0xAABBGGRR: RGB 30,158,255 blue; box fill is the same blue, mostly transparent).
 SELECT_COLOR = 0xFFFF9E1E
@@ -189,6 +196,8 @@ class ScratchBlocksWindow(ui.Window):
         self._speed_fields = {}
         self._repeat_models = {}
         self._repeat_fields = {}
+        self._wave_models = {}   # (block_id, key) -> model of a WAVE number field
+        self._wave_fields = {}
         # Step 1 (performance): highlight frames are built once per canvas
         # build and only shown/hidden while a program runs.
         self._highlight_rects: dict[str, Any] = {}
@@ -228,6 +237,8 @@ class ScratchBlocksWindow(ui.Window):
         self._speed_fields.clear()
         self._repeat_models.clear()
         self._repeat_fields.clear()
+        self._wave_models.clear()
+        self._wave_fields.clear()
         self._highlight_rects.clear()
         self._invalidate_scene_cache()
         self._runner.stop()
@@ -330,6 +341,7 @@ class ScratchBlocksWindow(ui.Window):
                     ("move_all_joints", "Move All Joints", "move_joint_block.svg"),
                     ("move_linear", "Move Linear (absolute)", "move_linear_block.svg"),
                     ("move_relative", "Move Relative", "move_linear_block.svg"),
+                    ("wave", "Wave (preset)", "move_joint_block.svg"),
                     ("set_speed", "Set Joint Speed (deg/s)", "move_joint_block.svg"))),
         ("GRIPPER", (("initialize_gripper", "Initialize Gripper", "initialize_robot_block.svg"),
                      ("gripper", "Gripper open / close", "gripper_block.svg"))),
@@ -389,6 +401,7 @@ class ScratchBlocksWindow(ui.Window):
         self._all_joint_fields.clear()
         self._speed_fields.clear()
         self._repeat_fields.clear()
+        self._wave_fields.clear()
         self._highlight_rects.clear()
         self._joint_labels.clear()
         self._gripper_labels.clear()
@@ -470,6 +483,8 @@ class ScratchBlocksWindow(ui.Window):
                     self._build_speed_field(local)
                 elif block.type == "repeat":
                     self._build_repeat_field(local)
+                elif block.type == "wave":
+                    self._build_wave_fields(local)
 
     # ------------------------------------------------------------------
     # Step 2: live dragging. The handle Placer follows the mouse by itself
@@ -511,6 +526,8 @@ class ScratchBlocksWindow(ui.Window):
             return 126.0
         if block.type == "initialize_gripper":
             return 100.0
+        if block.type == "wave":
+            return 50.0
         if block.type in ("initialize_robot", "set_speed", "move_joint", "move_linear",
                           "move_relative", "gripper", "repeat", "end_repeat"):
             return 90.0
@@ -1010,6 +1027,8 @@ class ScratchBlocksWindow(ui.Window):
     def _width_for_block(self, block: ProgramBlock) -> float:
         if block.type == "end_repeat":
             return END_ARM_WIDTH
+        if block.type == "wave":
+            return WAVE_WIDTH
         if block.type != "move_all_joints":
             return BLOCK_WIDTH
         count = len(self._all_joint_names(block))
@@ -1141,6 +1160,7 @@ class ScratchBlocksWindow(ui.Window):
             "move_joint": "move_joint_block.svg",
             "move_linear": "move_linear_block.svg",
             "move_relative": "move_linear_block.svg",
+            "wave": "move_joint_block.svg",
             "gripper": "gripper_block.svg",
             "repeat": "repeat_block.svg",
             "end_repeat": "repeat_block.svg",
@@ -1191,6 +1211,7 @@ class ScratchBlocksWindow(ui.Window):
                             "move_joint": "SINGLE JOINT",
                             "move_linear": "MOVE LINEAR",
                             "move_relative": "MOVE RELATIVE",
+                            "wave": "WAVE",
                             "gripper": "GRIPPER",
                             "repeat": "REPEAT",
                             "end_repeat": "",
@@ -1203,8 +1224,8 @@ class ScratchBlocksWindow(ui.Window):
                     )
                     # Keep original layout widths but draw the input widgets
                     # as foreground siblings, not inside the drag-enabled block.
-                    if block.type in ("end_repeat", "stop_program"):
-                        pass
+                    if block.type in ("end_repeat", "stop_program", "wave"):
+                        pass  # WAVE: its fields are drawn on top in _build_wave_fields
                     elif block.type == "robot_properties":
                         pass  # Dieser Block besitzt keine Eingabefelder.
                     elif block.type in ("move_all_joints", "move_joint", "move_linear", "move_relative", "gripper"):
@@ -1359,6 +1380,11 @@ class ScratchBlocksWindow(ui.Window):
         """
         if block.type in ("robot_properties", "end_repeat", "repeat", "stop_program"):
             return
+        if block.type == "wave":
+            # Joint menu: same dropdown as SINGLE JOINT. Numbers: _build_wave_fields.
+            self._build_move_joint_inline(block, (block.x + 62) * self._zoom,
+                                          (block.y + WIDGET_TOP) * self._zoom)
+            return
         scale = self._zoom
         is_init = block.type == "initialize_robot"
         if block.type == "initialize_gripper":
@@ -1497,6 +1523,79 @@ class ScratchBlocksWindow(ui.Window):
         block.value = action  # Same values expected by runner and compiler.
         self._refresh_canvas()
         self._set_status(f"GRIPPER: {action}")
+
+    # ------------------------------------------------------------------
+    # WAVE: joint menu (shared with SINGLE JOINT) + four inline number fields
+    # ------------------------------------------------------------------
+    def _build_wave_fields(self, block: ProgramBlock) -> None:
+        """low / high / Hz / cycles, each a small caption + keyboard-editable field."""
+        scale = self._zoom
+        field_height = ui.Pixel(WIDGET_HEIGHT * scale)
+        top = ui.Pixel((block.y + WIDGET_TOP) * scale)
+        try:
+            value = validate_wave_parameters(block.value)
+        except (TypeError, ValueError):
+            value = validate_wave_parameters({})
+        for index, (key, caption, tip) in enumerate(WAVE_FIELDS):
+            base = block.x + 170 + index * 70
+            model_key = (block.id, key)
+            model = self._wave_models.get(model_key)
+            if model is None:
+                model = ui.SimpleStringModel(f"{float(value[key]):g}")
+                self._wave_models[model_key] = model
+                model.add_end_edit_fn(
+                    lambda changed, b_id=block.id, k=key: self._wave_edited(b_id, k, changed))
+            with ui.Placer(offset_x=ui.Pixel(base * scale), offset_y=top,
+                           width=ui.Pixel(28 * scale), height=field_height, stable_size=True):
+                ui.Label(caption, width=ui.Pixel(28 * scale), height=field_height,
+                         alignment=ui.Alignment.RIGHT_CENTER, opaque_for_mouse_events=False,
+                         style={"color": 0xFFFFFFFF, "font_size": max(7, int(10 * scale)),
+                                "margin": 0})
+            width = ui.Pixel(38 * scale)
+            with ui.Placer(offset_x=ui.Pixel((base + 31) * scale), offset_y=top,
+                           width=width, height=field_height, stable_size=True):
+                self._wave_fields[model_key] = ui.StringField(
+                    model=model, width=width, height=field_height, enabled=True,
+                    style={"color": 0xFF1A1A1A, "font_size": max(8, int(11 * scale)), "margin": 0},
+                    tooltip=tip + "; Enter to save",
+                    mouse_pressed_fn=lambda x, y, button, mods, b_id=block.id, k=key:
+                        self._wave_field_pressed(b_id, k, button),
+                )
+
+    def _wave_field_pressed(self, block_id: str, key: str, button: Any) -> None:
+        if self._runner.is_running or block_id not in self._program.blocks:
+            return
+        try:
+            if int(button) not in (0, 1):
+                return
+        except (TypeError, ValueError):
+            pass
+        self._focus_now(self._wave_fields.get((block_id, key)))
+        asyncio.ensure_future(self._focus_wave_next_frame(block_id, key))
+
+    async def _focus_wave_next_frame(self, block_id: str, key: str) -> None:
+        import omni.kit.app
+        await omni.kit.app.get_app().next_update_async()
+        field = self._wave_fields.get((block_id, key))
+        if field is not None and block_id in self._program.blocks:
+            try:
+                field.focus_keyboard(True)
+            except Exception as error:
+                self._set_status(f"WAVE: focus error: {error}")
+
+    def _wave_edited(self, block_id: str, key: str, model: Any) -> None:
+        block = self._program.blocks.get(block_id)
+        if block is None or block.type != "wave" or self._runner.is_running:
+            return
+        try:
+            number = float(model.get_value_as_string().strip().replace(",", "."))
+            updated = dict(block.value)
+            updated[key] = number
+            block.value = validate_wave_parameters(updated)
+            self._set_status(f"WAVE: {key} = {number:g}")
+        except (TypeError, ValueError, OverflowError) as error:
+            model.set_value(f"{float(block.value.get(key, 0.0)):g}")   # restore the last valid value
+            self._set_status(f"WAVE: {error}")
 
     # ------------------------------------------------------------------
     # MOVE LINEAR: inline X/Y/Z relative world displacements (metres)
@@ -1806,7 +1905,7 @@ class ScratchBlocksWindow(ui.Window):
         """Apply the choice now and change only the label text (no rebuild)."""
         block = self._program.blocks.get(block_id)
         label = self._joint_labels.get(block_id)
-        if block is None or block.type != "move_joint" or self._runner.is_running:
+        if block is None or block.type not in ("move_joint", "wave") or self._runner.is_running:
             return
         if label is None:  # no label to update: fall back to the old rebuild path
             asyncio.ensure_future(self._apply_joint_selection_next_frame(block_id, joint_name))
@@ -1823,7 +1922,7 @@ class ScratchBlocksWindow(ui.Window):
         import omni.kit.app
         await omni.kit.app.get_app().next_update_async()
         block = self._program.blocks.get(block_id)
-        if block is None or self._runner.is_running or block.type != "move_joint":
+        if block is None or self._runner.is_running or block.type not in ("move_joint", "wave"):
             return
         if joint_name not in self._joint_names_for_block(block_id):
             self._set_status("Selected joint is no longer available in the stage")
@@ -2140,8 +2239,8 @@ class ScratchBlocksWindow(ui.Window):
             self._parameter_window.visible = False
         if block.type in ("set_speed", "repeat", "end_repeat", "stop_program", "initialize_gripper"):
             return  # Edited inline (INIT GRIPPER: menu on the block), or has no parameters.
-        if block.type == "move_joint":
-            return  # Joint and angle are edited directly inside the block.
+        if block.type in ("move_joint", "wave"):
+            return  # Joint and numbers are edited directly inside the block.
         if block.type == "move_all_joints":
             return  # All joint angles are edited directly in the block.
         if block.type == "gripper":
@@ -2620,6 +2719,9 @@ class ScratchBlocksWindow(ui.Window):
             for axis in ("x", "y", "z"):
                 self._linear_models.pop((block_id, axis), None)
                 self._linear_fields.pop((block_id, axis), None)
+            for key, _caption, _tip in WAVE_FIELDS:
+                self._wave_models.pop((block_id, key), None)
+                self._wave_fields.pop((block_id, key), None)
             self._set_status("Block deleted")
             self._refresh_canvas()
 
@@ -2925,7 +3027,7 @@ class ScratchBlocksWindow(ui.Window):
                     from .robot_profiles import load_gripper_profile, with_gripper
                     gripper_value = validate_gripper_init_parameters(block.value)
                     profile = with_gripper(profile, load_gripper_profile(gripper_value["profile"]))
-                elif block.type in ("robot_properties", "move_all_joints", "move_joint", "move_linear", "move_relative", "gripper"):
+                elif block.type in ("robot_properties", "move_all_joints", "move_joint", "move_linear", "move_relative", "gripper", "wave"):
                     if profile is None:
                         raise ValueError(f"{block.type.upper()} requires INIT ROBOT before it")
                     if block.type == "move_all_joints":
@@ -2953,6 +3055,24 @@ class ScratchBlocksWindow(ui.Window):
                             raise ValueError("Explicit kinematics files require a frame")
                         if not descriptor and not profile.get("kinematics"):
                             raise ValueError("INIT profile has no linear kinematics")
+                    elif block.type == "wave":
+                        value = validate_wave_parameters(block.value)
+                        if not value["joint_name"] or value["joint_name"] == "Select joint":
+                            raise ValueError("WAVE: choose a joint in the block")
+                        if profile["name"] != "generic":
+                            resolve_joint(profile, value["joint_name"])
+                        from .real_robot import max_joint_speed_deg_s
+                        amplitude = (value["high"] - value["low"]) / 2.0
+                        limit = max_joint_speed_deg_s(value["joint_name"])
+                        # Same shape factor as the simulation (robot_control.WAVE_SHARPNESS).
+                        from .robot_control import WAVE_SHARPNESS as s
+                        factor = s / math.asin(s) if s > 1e-6 else 1.0
+                        peak = 2.0 * math.pi * value["frequency"] * amplitude * factor
+                        if peak > limit:
+                            f_max = limit / (2.0 * math.pi * amplitude * factor)
+                            raise ValueError(
+                                f"WAVE {value['joint_name']}: {peak:.0f} deg/s is above the real arm's "
+                                f"{limit:g} deg/s (datasheet) - use at most {f_max:.2f} Hz or a smaller swing")
                     elif block.type == "gripper":
                         if not profile.get("gripper"):
                             raise ValueError("No gripper: add INIT GRIPPER after INIT ROBOT")
@@ -2984,6 +3104,7 @@ class ScratchBlocksWindow(ui.Window):
         self._joint_degree_models.clear()
         self._all_joint_models.clear()
         self._linear_models.clear()
+        self._wave_models.clear()
         self._refresh_canvas()
         self._set_status("Cleared")
 
@@ -3125,6 +3246,7 @@ class ScratchBlocksWindow(ui.Window):
             self._all_joint_models.clear()
             self._joint_degree_models.clear()
             self._linear_models.clear()
+            self._wave_models.clear()
             self._invalidate()                 # a different program is never validated
             self._refresh_canvas()
             if path != self._save_path:

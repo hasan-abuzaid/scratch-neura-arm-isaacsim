@@ -288,3 +288,102 @@ async def _execute_joint_ramp(robot, indices, target, speed_degrees_per_second):
         subscription = None  # Release outside the physics callback on every exit.
     print(f"[Robot] Joint ramp: planned duration={duration:.3f} simulation seconds; "
           f"peak target speed <= {speed:g} deg/s; final readback check follows")
+
+
+# ---------------------------------------------------------------------------
+# ADD TO robot_motion.py  (paste at the end of the file)
+# Continuous wave on one joint: q(t) = c + A*cos(2*pi*f*t)
+# - first moves smoothly to the top of the swing (standing still there)
+# - then waves with NO stop at the turning points
+# - refuses settings faster than the joint's max speed
+# ---------------------------------------------------------------------------
+
+async def wave_joint(
+    robot,
+    joint_name: str,
+    low_degrees: float,
+    high_degrees: float,
+    frequency_hz: float = 1.0,       # full swings (there and back) per second
+    cycles: float = 3.0,             # 3 = ends at the top, 2.5 = ends at the bottom
+    max_speed_deg_s: float = 180.0,  # LARA 8 datasheet: A5/A6 180, A3/A4 150, A1/A2 130
+    approach_speed_deg_s: float = 60.0,
+    sharpness: float = 0.0,          # 0 = pure sine (slow turns) ... 0.95 = quick, hand-like turns
+):
+    import omni.kit.app
+    import omni.physx
+
+    low, high = float(low_degrees), float(high_degrees)
+    f, n = float(frequency_hz), float(cycles)
+    if not (math.isfinite(low) and math.isfinite(high)) or high <= low:
+        raise ValueError("WAVE: high must be larger than low")
+    if not math.isfinite(f) or f <= 0:
+        raise ValueError("WAVE: frequency must be positive")
+    if n <= 0 or not (2 * n).is_integer():
+        raise ValueError("WAVE: cycles must be a multiple of 0.5 (ends standing still)")
+
+    s = float(sharpness)
+    if not math.isfinite(s) or not 0.0 <= s <= 0.98:
+        raise ValueError("WAVE: sharpness must be between 0 and 0.98")
+    # Shape: asin(s*cos)/asin(s). s=0 -> sine; s->1 -> triangle (constant speed, quick turns).
+    # Turns stay smooth (zero speed at the ends) for any s < 1.
+    shaped = s > 1e-6
+    speed_factor = (s / math.asin(s)) if shaped else 1.0
+
+    center = (low + high) / 2.0
+    amplitude = (high - low) / 2.0
+    peak_speed = 2.0 * math.pi * f * amplitude * speed_factor
+    if peak_speed > max_speed_deg_s:
+        f_max = max_speed_deg_s / (2.0 * math.pi * amplitude * speed_factor)
+        raise ValueError(f"WAVE: peak speed {peak_speed:.0f} deg/s > limit {max_speed_deg_s:g}; "
+                         f"use frequency <= {f_max:.2f} Hz or a smaller swing")
+
+    names = list(robot.dof_names)
+    if joint_name not in names:
+        raise ValueError(f"WAVE: unknown joint {joint_name}")
+    index = names.index(joint_name)
+    limits = np.asarray(robot._articulation_view.get_dof_limits())
+    if limits.ndim == 3:
+        limits = limits[0]
+    if not (limits[index, 0] <= math.radians(low) and math.radians(high) <= limits[index, 1]):
+        raise ValueError("WAVE: swing is outside the joint limits")
+
+    # 1) Go to the top of the swing and stand still there (existing smooth ramp + settle).
+    await move_all_joints(robot, {joint_name: high}, speed_degrees_per_second=approach_speed_deg_s)
+
+    # 2) Continuous wave, timed in simulation time.
+    indices = np.asarray([index], dtype=np.int32)
+    duration = n / f
+    timeline = omni.timeline.get_timeline_interface()
+    app = omni.kit.app.get_app()
+    elapsed = 0.0
+
+    def on_physics_step(dt):
+        nonlocal elapsed
+        elapsed += float(dt)
+
+    subscription = omni.physx.get_physx_interface().subscribe_physics_step_events(on_physics_step)
+    try:
+        while True:
+            if not timeline.is_playing():
+                raise RuntimeError("Simulation wurde angehalten.")
+            t = min(elapsed, duration)
+            x = math.cos(2.0 * math.pi * f * t)
+            q = center + amplitude * ((math.asin(s * x) / math.asin(s)) if shaped else x)
+            robot.apply_action(ArticulationAction(
+                joint_positions=np.asarray([math.radians(q)]), joint_indices=indices))
+            if t >= duration:
+                break
+            await app.next_update_async()
+    except BaseException:
+        # Stop pressed / error: hold where the joint is now.
+        try:
+            current = np.asarray(robot.get_joint_positions()).reshape(-1)[indices]
+            robot.apply_action(ArticulationAction(joint_positions=current.copy(), joint_indices=indices))
+        except Exception:
+            pass
+        raise
+    finally:
+        subscription = None
+
+    print(f"[Robot] Wave {joint_name}: {low:g}..{high:g} deg, {f:g} Hz, {n:g} cycles, sharpness {s:g}, "
+          f"peak {peak_speed:.0f} deg/s, {duration:.2f} s")

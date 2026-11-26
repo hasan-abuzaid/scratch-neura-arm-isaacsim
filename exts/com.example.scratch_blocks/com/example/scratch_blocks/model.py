@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 
-SUPPORTED_BLOCKS = {"set_speed", "print", "wait", "initialize_robot", "initialize_gripper", "robot_properties", "move_joint", "move_all_joints", "move_linear", "move_relative", "gripper", "repeat", "end_repeat", "stop_program"}
+SUPPORTED_BLOCKS = {"set_speed", "print", "wait", "initialize_robot", "initialize_gripper", "robot_properties", "move_joint", "move_all_joints", "move_linear", "move_relative", "gripper", "repeat", "end_repeat", "stop_program", "wave"}
 BLOCK_WIDTH = 360
 BLOCK_HEIGHT = 52
 # Isaac Sim DPI-scales the SVG widget while ui.Placer uses canvas offsets.
@@ -91,6 +91,28 @@ def validate_linear_parameters(raw_value: Any) -> dict[str, str | float]:
     }
 
 
+def validate_wave_parameters(raw_value: Any) -> dict[str, str | float]:
+    """WAVE: one joint swings between low and high (degrees), frequency in Hz,
+    cycles = full there-and-back swings; a multiple of 0.5 so it ends standing still."""
+    if not isinstance(raw_value, dict):
+        raise ValueError("WAVE requires a parameter dictionary")
+    joint_name = str(raw_value.get("joint_name", "")).strip()
+    low = float(raw_value.get("low", 55.0))
+    high = float(raw_value.get("high", 85.0))
+    frequency = float(raw_value.get("frequency", 1.5))
+    cycles = float(raw_value.get("cycles", 3.0))
+    if not all(math.isfinite(v) for v in (low, high, frequency, cycles)):
+        raise ValueError("WAVE values must be finite")
+    if high <= low:
+        raise ValueError("WAVE: high must be larger than low")
+    if frequency <= 0 or frequency > 5:
+        raise ValueError("WAVE: frequency must be between 0 and 5 Hz")
+    if not (2 * cycles).is_integer() or not 0.5 <= cycles <= 50:
+        raise ValueError("WAVE: cycles must be 0.5, 1, 1.5 ... up to 50")
+    return {"joint_name": joint_name, "low": low, "high": high,
+            "frequency": frequency, "cycles": cycles}
+
+
 @dataclass
 class ProgramBlock:
     id: str
@@ -128,6 +150,8 @@ class ProgramBlock:
             value = "open"
         elif block_type == "move_all_joints":
             value = {"targets": ""}
+        elif block_type == "wave":
+            value = validate_wave_parameters({"joint_name": "Select joint"})
         elif block_type == "move_joint":
             # Gelenkname bleibt roboterspezifisch und später editierbar.
             value = {"joint_name": "Select joint", "target_degrees": 15.0}
@@ -174,6 +198,8 @@ class ProgramBlock:
                 "joint_name": joint_name.strip(),
                 "target_degrees": target_degrees,
             }
+        elif block_type == "wave":
+            value = validate_wave_parameters(raw_value)
         elif block_type == "set_speed":
             value = validate_speed(raw_value)
         elif block_type == "wait":
@@ -494,7 +520,7 @@ def retarget_joint_names(program: "BlockProgram", new_names: list[str]) -> tuple
 
     changed, missing = 0, set()
     for block in program.blocks.values():
-        if block.type == "move_joint" and isinstance(block.value, dict):
+        if block.type in ("move_joint", "wave") and isinstance(block.value, dict):
             old = str(block.value.get("joint_name", ""))
             if not old or old == "Select joint":
                 continue
